@@ -60,6 +60,144 @@ const guildCooldowns = new Map();
 const conversationHistories = new Map();
 
 // ====================
+// CONTEXT MANAGER (SIMPLIFIED VERSION)
+// ====================
+
+class ContextManager {
+    constructor(supabaseClient) {
+        this.supabase = supabaseClient;
+    }
+
+    async getConversationContext(channelId, userId, limit = 5) {
+        try {
+            const { data, error } = await this.supabase
+                .from('conversations')
+                .select('*')
+                .eq('channel_id', channelId)
+                .eq('user_id', userId)
+                .order('created_at', { ascending: false })
+                .limit(limit);
+            
+            if (error) throw error;
+            return data ? data.reverse() : [];
+        } catch (error) {
+            console.error('Error getting conversation context:', error);
+            return [];
+        }
+    }
+
+    createSummary(conversations) {
+        if (!conversations || conversations.length === 0) return '';
+        
+        const recent = conversations.slice(-3);
+        const summary = recent.map(conv => {
+            // Use ai_response instead of bot_response
+            const userMsg = conv.user_message ? conv.user_message.substring(0, 100) : '';
+            const botResp = conv.ai_response ? conv.ai_response.substring(0, 100) : '';
+            return `User: ${userMsg} | Bot: ${botResp}`;
+        }).join('\n');
+        
+        return `Recent conversation summary:\n${summary}`;
+    }
+
+    async assembleContext(adminInstructions, channelId, userId, currentMessage) {
+        // 1. Get conversation history
+        const history = await this.getConversationContext(channelId, userId);
+        
+        // 2. Create rolling summary
+        const summary = this.createSummary(history);
+        
+        // 3. Format previous exchanges
+        const previousExchanges = history.map(conv => {
+            const userMsg = conv.user_message || '';
+            const botResp = conv.ai_response || ''; // Use ai_response
+            return `User: ${userMsg}\nAssistant: ${botResp}`;
+        }).join('\n\n');
+        
+        // 4. Combine everything
+        return {
+            systemInstructions: adminInstructions,
+            conversationSummary: summary,
+            previousConversations: previousExchanges,
+            currentMessage: currentMessage,
+            fullContext: `
+SYSTEM INSTRUCTIONS:
+${adminInstructions}
+
+${summary ? `CONVERSATION SUMMARY:\n${summary}\n\n` : ''}
+${previousExchanges ? `PREVIOUS CONVERSATION:\n${previousExchanges}\n\n` : ''}
+CURRENT MESSAGE:
+${currentMessage}
+
+ASSISTANT RESPONSE:`
+        };
+    }
+
+async saveConversation(channelId, userId, userMessage, botResponse) {
+    try {
+        console.log(`💾 Attempting to save conversation:`);
+        console.log(`   Channel ID: ${channelId}`);
+        console.log(`   User ID: ${userId}`);
+        console.log(`   User Message: ${userMessage.substring(0, 50)}...`);
+        console.log(`   Bot Response: ${botResponse.substring(0, 50)}...`);
+        
+        const history = await this.getConversationContext(channelId, userId);
+        const updatedHistory = [...history, { 
+            user_message: userMessage, 
+            ai_response: botResponse
+        }];
+        const newSummary = this.createSummary(updatedHistory);
+        
+        console.log(`   Creating summary...`);
+        
+        const { data, error } = await this.supabase
+            .from('conversations')
+            .insert({
+                channel_id: channelId,
+                user_id: userId,
+                user_message: userMessage,
+                ai_response: botResponse,
+                context_summary: newSummary,
+                created_at: new Date().toISOString()
+            })
+            .select(); // Add .select() to see what was inserted
+        
+        if (error) {
+            console.error('❌ Database insert error:', error);
+            throw error;
+        }
+        
+        console.log('✅ Conversation saved successfully:', data);
+        return true;
+        
+    } catch (error) {
+        console.error('❌ Error saving conversation:', error.message);
+        console.error('Full error:', error);
+        return false;
+    }
+}
+
+    async clearConversation(channelId, userId) {
+        try {
+            const { error } = await this.supabase
+                .from('conversations')
+                .delete()
+                .eq('channel_id', channelId)
+                .eq('user_id', userId);
+            
+            if (error) throw error;
+            return true;
+        } catch (error) {
+            console.error('Error clearing conversation:', error);
+            return false;
+        }
+    }
+}
+
+// Initialize ContextManager
+const contextManager = new ContextManager(supabase);
+
+// ====================
 // HELPER FUNCTIONS
 // ====================
 
@@ -269,37 +407,31 @@ async function handlePingCommand(message) {
 }
 
 // !clear command
+// !clear command
 async function handleClearCommand(message) {
     const channelId = message.channel.id;
+    const userId = message.author.id;
     
     try {
         // Clear conversation history from database
-        const { error } = await supabase
-            .from('conversations')
-            .delete()
-            .eq('channel_id', channelId);
+        const success = await contextManager.clearConversation(channelId, userId);
         
-        if (error) {
-            throw error;
+        if (success) {
+            const embed = new EmbedBuilder()
+                .setColor(0x3498DB)
+                .setTitle('🗑️ Conversation Cleared')
+                .setDescription(`All conversation history has been cleared for this channel.`)
+                .setFooter({ text: 'New conversations will start fresh' })
+                .setTimestamp();
+            
+            await message.reply({ embeds: [embed] });
+        } else {
+            await message.reply('❌ Failed to clear conversation history.');
         }
-        
-        // Also clear from memory cache
-        conversationHistories.forEach((history, userId) => {
-            // Keep user histories but they won't have channel context
-        });
-        
-        const embed = new EmbedBuilder()
-            .setColor(0x3498DB)
-            .setTitle('🗑️ Conversation Cleared')
-            .setDescription(`All conversation history has been cleared for this channel.`)
-            .setFooter({ text: 'New conversations will start fresh' })
-            .setTimestamp();
-        
-        await message.reply({ embeds: [embed] });
         
     } catch (error) {
         console.error('Clear command error:', error);
-        await message.reply('❌ Failed to clear conversation history.');
+        await message.reply('❌ An error occurred while clearing conversation history.');
     }
 }
 
@@ -481,12 +613,6 @@ async function handleAdminRestartCommand(message) {
         
         await restartMsg.edit({ embeds: [updatedEmbed] });
     }, 5000);
-}
-
-// !ask command (alias for !ai)
-async function handleAskCommand(message, args) {
-    // This will be handled in the main message handler
-    // We'll just redirect it to the AI handler
 }
 
 // ====================
@@ -678,6 +804,73 @@ async function handleImageCommand(message, args) {
 }
 
 // ====================
+// AI CHAT HANDLER WITH CONTEXT
+// ====================
+
+async function handleAIChatWithContext(message, prompt, config) {
+    const channelId = message.channel.id;
+    const userId = message.author.id;
+    
+    try {
+        // 1. Assemble context from conversation history
+        const context = await contextManager.assembleContext(
+            config.system_instructions,
+            channelId,
+            userId,
+            prompt
+        );
+        
+        console.log(`🤖 Context assembled for ${message.author.username}`);
+        
+        // 2. Call Hugging Face API with the context
+        await message.channel.sendTyping();
+        
+        const startTime = Date.now();
+        const aiResponse = await callHuggingFaceAPI(
+            prompt,
+            context.fullContext,
+            [] 
+        );
+        const processingTime = Date.now() - startTime;
+        
+        console.log(`   ✅ Response (${processingTime}ms, ${aiResponse.tokens} tokens)`);
+        
+        // 3. Save conversation to database - FIXED to use ai_response
+        await contextManager.saveConversation(
+            channelId,
+            userId,
+            prompt,
+            aiResponse.text
+        );
+        
+        // 4. Send response
+        if (aiResponse.text.length <= 2000) {
+            await message.reply(aiResponse.text);
+        } else {
+            const chunks = [];
+            let remaining = aiResponse.text;
+            
+            while (remaining.length > 0) {
+                const chunk = remaining.substring(0, 1997);
+                const lastPeriod = chunk.lastIndexOf('.');
+                const splitAt = lastPeriod > 1500 ? lastPeriod + 1 : 1997;
+                chunks.push(chunk.substring(0, splitAt));
+                remaining = remaining.substring(splitAt);
+            }
+            
+            await message.reply(chunks[0]);
+            for (let i = 1; i < chunks.length; i++) {
+                await message.channel.send(chunks[i]);
+            }
+        }
+        
+    } catch (error) {
+        console.error(`   ❌ Error in AI chat: ${error.message}`);
+        throw error;
+    }
+}
+
+// ====================
 // DISCORD EVENT HANDLERS
 // ====================
 
@@ -745,7 +938,7 @@ client.on('messageCreate', async (message) => {
         return await handleImageCommand(message, args);
     }
     
-    // Handle AI chat (existing functionality)
+    // Handle AI chat (NEW WITH CONTEXT AWARENESS)
     const config = await getBotConfig();
     
     const shouldRespond = 
@@ -784,67 +977,8 @@ client.on('messageCreate', async (message) => {
     try {
         updateCooldowns(message.author.id, message.guild?.id || 'dm');
         
-        await message.channel.sendTyping();
-        
-        const userId = message.author.id;
-        if (!conversationHistories.has(userId)) {
-            conversationHistories.set(userId, []);
-        }
-        const history = conversationHistories.get(userId);
-        
-        const startTime = Date.now();
-        const aiResponse = await callHuggingFaceAPI(prompt, config.system_instructions, history);
-        const processingTime = Date.now() - startTime;
-        
-        console.log(`   ✅ Response (${processingTime}ms, ${aiResponse.tokens} tokens)`);
-        
-        history.push(
-            { role: 'user', content: prompt },
-            { role: 'assistant', content: aiResponse.text }
-        );
-        
-        if (history.length > 6) {
-            history.splice(0, 2);
-        }
-        
-        // Save to database
-        try {
-            await supabase
-                .from('conversations')
-                .insert({
-                    user_id: message.author.id,
-                    user_name: message.author.username,
-                    channel_id: message.channel.id,
-                    channel_name: message.channel.name,
-                    user_message: prompt,
-                    ai_response: aiResponse.text,
-                    tokens_used: aiResponse.tokens,
-                    response_time_ms: processingTime
-                });
-        } catch (dbError) {
-            console.log('⚠️ Could not save conversation:', dbError.message);
-        }
-        
-        // Send response
-        if (aiResponse.text.length <= 2000) {
-            await message.reply(aiResponse.text);
-        } else {
-            const chunks = [];
-            let remaining = aiResponse.text;
-            
-            while (remaining.length > 0) {
-                const chunk = remaining.substring(0, 1997);
-                const lastPeriod = chunk.lastIndexOf('.');
-                const splitAt = lastPeriod > 1500 ? lastPeriod + 1 : 1997;
-                chunks.push(chunk.substring(0, splitAt));
-                remaining = remaining.substring(splitAt);
-            }
-            
-            await message.reply(chunks[0]);
-            for (let i = 1; i < chunks.length; i++) {
-                await message.channel.send(chunks[i]);
-            }
-        }
+        // Use new context-aware handler
+        await handleAIChatWithContext(message, prompt, config);
         
     } catch (error) {
         console.error(`   ❌ Error: ${error.message}`);

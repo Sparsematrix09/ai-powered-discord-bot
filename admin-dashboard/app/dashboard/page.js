@@ -12,6 +12,12 @@ export default function Dashboard() {
   const [saveStatus, setSaveStatus] = useState(null)
   const [activeSection, setActiveSection] = useState('instructions')
   const [currentUser, setCurrentUser] = useState(null)
+  const [memoryStats, setMemoryStats] = useState(null)
+  const [selectedUser, setSelectedUser] = useState('')
+  const [selectedChannel, setSelectedChannel] = useState('')
+  const [memoryLoading, setMemoryLoading] = useState(false)
+  const [conversationPreview, setConversationPreview] = useState([])
+  const [memoryFilter, setMemoryFilter] = useState('all') // 'all', 'user', 'channel'
   const router = useRouter()
   const saveTimeoutRef = useRef(null)
 
@@ -35,6 +41,7 @@ export default function Dashboard() {
     }
     
     loadSettings()
+    loadMemoryStats()
   }, [router])
 
   const loadSettings = async () => {
@@ -56,6 +63,68 @@ export default function Dashboard() {
     }
     setIsLoading(false)
   }
+
+  const loadMemoryStats = async () => {
+  setMemoryLoading(true);
+  try {
+    // Get conversation statistics
+    const { data: conversations, error: convError } = await supabase
+      .from('conversations')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    
+    if (convError) throw convError;
+    
+    // Get unique users and channels
+    const { data: usersData, error: usersError } = await supabase
+      .from('conversations')
+      .select('user_id')
+      .order('created_at', { ascending: false });
+    
+    if (usersError) throw usersError;
+    
+    const { data: channelsData, error: channelsError } = await supabase
+      .from('conversations')
+      .select('channel_id')
+      .order('created_at', { ascending: false });
+    
+    if (channelsError) throw channelsError;
+    
+    // Transform conversations to use correct field names
+    const formattedConversations = conversations?.map(conv => ({
+      user_id: conv.user_id,
+      channel_id: conv.channel_id,
+      user_message: conv.user_message,
+      bot_response: conv.ai_response, // Map ai_response to bot_response
+      created_at: conv.created_at
+    })) || [];
+    
+    const stats = {
+      totalConversations: formattedConversations.length || 0,
+      uniqueUsers: new Set(usersData?.map(c => c.user_id)).size,
+      uniqueChannels: new Set(channelsData?.map(c => c.channel_id)).size,
+      oldestConversation: formattedConversations?.[formattedConversations.length - 1]?.created_at,
+      newestConversation: formattedConversations?.[0]?.created_at,
+      recentConversations: formattedConversations?.slice(0, 5) || []
+    };
+    
+    setMemoryStats(stats);
+    setConversationPreview(stats.recentConversations);
+  } catch (error) {
+    console.error('Error loading memory stats:', error);
+    setMemoryStats({
+      totalConversations: 0,
+      uniqueUsers: 0,
+      uniqueChannels: 0,
+      oldestConversation: null,
+      newestConversation: null,
+      recentConversations: []
+    });
+  } finally {
+    setMemoryLoading(false);
+  }
+};
 
   const saveSettings = async () => {
     if (isSaving) return
@@ -125,10 +194,143 @@ export default function Dashboard() {
       if (error) throw error
       
       alert('All conversations have been reset.')
+      loadMemoryStats() // Refresh stats
     } catch (error) {
       alert('Error resetting memory: ' + error.message)
     }
   }
+
+  const clearUserMemory = async () => {
+    if (!selectedUser) {
+      alert('Please select a user first')
+      return
+    }
+    
+    if (!window.confirm(`Clear all conversation memory for user ${selectedUser}?`)) {
+      return
+    }
+    
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .delete()
+        .eq('user_id', selectedUser)
+      
+      if (error) throw error
+      
+      alert(`Conversation history cleared for user ${selectedUser}`)
+      loadMemoryStats() // Refresh stats
+    } catch (error) {
+      alert('Error clearing user memory: ' + error.message)
+    }
+  }
+
+  const clearChannelMemory = async () => {
+    if (!selectedChannel) {
+      alert('Please select a channel first')
+      return
+    }
+    
+    if (!window.confirm(`Clear all conversation memory for channel ${selectedChannel}?`)) {
+      return
+    }
+    
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .delete()
+        .eq('channel_id', selectedChannel)
+      
+      if (error) throw error
+      
+      alert(`Conversation history cleared for channel ${selectedChannel}`)
+      loadMemoryStats() // Refresh stats
+    } catch (error) {
+      alert('Error clearing channel memory: ' + error.message)
+    }
+  }
+
+  const loadUserConversations = async (userId) => {
+  if (!userId) return;
+  
+  try {
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    if (error) throw error;
+    
+    // Transform the data
+    const formattedData = data?.map(conv => ({
+      user_id: conv.user_id,
+      channel_id: conv.channel_id,
+      user_message: conv.user_message,
+      bot_response: conv.ai_response, // Map ai_response to bot_response
+      created_at: conv.created_at
+    })) || [];
+    
+    setConversationPreview(formattedData);
+  } catch (error) {
+    console.error('Error loading user conversations:', error);
+  }
+};
+
+ const loadChannelConversations = async (channelId) => {
+  if (!channelId) return;
+  
+  try {
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('*')
+      .eq('channel_id', channelId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    if (error) throw error;
+    
+    // Transform the data
+    const formattedData = data?.map(conv => ({
+      user_id: conv.user_id,
+      channel_id: conv.channel_id,
+      user_message: conv.user_message,
+      bot_response: conv.ai_response, // Map ai_response to bot_response
+      created_at: conv.created_at
+    })) || [];
+    
+    setConversationPreview(formattedData);
+  } catch (error) {
+    console.error('Error loading channel conversations:', error);
+  }
+};
+
+  
+const loadAllConversations = async () => {
+  try {
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    if (error) throw error;
+    
+    // Transform the data
+    const formattedData = data?.map(conv => ({
+      user_id: conv.user_id,
+      channel_id: conv.channel_id,
+      user_message: conv.user_message,
+      bot_response: conv.ai_response, // Map ai_response to bot_response
+      created_at: conv.created_at
+    })) || [];
+    
+    setConversationPreview(formattedData);
+  } catch (error) {
+    console.error('Error loading all conversations:', error);
+  }
+};
 
   const logout = () => {
     // Clear localStorage
@@ -152,6 +354,13 @@ export default function Dashboard() {
     
     setChannelList([...channelList, channel])
     setNewChannel('')
+  }
+
+  // Format date for display
+  const formatDate = (dateString) => {
+    if (!dateString) return 'N/A'
+    const date = new Date(dateString)
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
   }
 
   if (isLoading) {
@@ -616,28 +825,248 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Memory Section */}
+          {/* Memory Section - UPDATED */}
           {activeSection === 'memory' && (
             <div className="section">
               <div className="section-header">
                 <h2>Memory Management</h2>
-                <p className="section-sub">Control conversation history and data</p>
+                <p className="section-sub">Monitor and control conversation history and context</p>
               </div>
               
+              {/* Memory Statistics Card */}
+              <div className="card">
+                <div className="card-header">
+                  <h3>Memory Statistics</h3>
+                  <button 
+                    onClick={loadMemoryStats}
+                    disabled={memoryLoading}
+                    className="btn-refresh"
+                    title="Refresh statistics"
+                  >
+                    {memoryLoading ? 'Loading...' : '⟳ Refresh'}
+                  </button>
+                </div>
+                
+                {memoryLoading ? (
+                  <div className="loading-skeleton">
+                    <div className="skeleton-row"></div>
+                    <div className="skeleton-row"></div>
+                    <div className="skeleton-row"></div>
+                  </div>
+                ) : memoryStats ? (
+                  <div className="stats-grid">
+                    <div className="stat-box">
+                      <div className="stat-icon">💬</div>
+                      <div className="stat-content">
+                        <div className="stat-value-large">{memoryStats.totalConversations}</div>
+                        <div className="stat-label">Total Conversations</div>
+                      </div>
+                    </div>
+                    
+                    <div className="stat-box">
+                      <div className="stat-icon">👤</div>
+                      <div className="stat-content">
+                        <div className="stat-value-large">{memoryStats.uniqueUsers}</div>
+                        <div className="stat-label">Unique Users</div>
+                      </div>
+                    </div>
+                    
+                    <div className="stat-box">
+                      <div className="stat-icon">#️⃣</div>
+                      <div className="stat-content">
+                        <div className="stat-value-large">{memoryStats.uniqueChannels}</div>
+                        <div className="stat-label">Active Channels</div>
+                      </div>
+                    </div>
+                    
+                    <div className="stat-box">
+                      <div className="stat-icon">📅</div>
+                      <div className="stat-content">
+                        <div className="stat-value-small">{memoryStats.newestConversation ? formatDate(memoryStats.newestConversation) : 'N/A'}</div>
+                        <div className="stat-label">Last Activity</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    <div className="empty-icon">📊</div>
+                    <p>No conversation data available</p>
+                    <p className="empty-sub">Start chatting with the bot to see statistics</p>
+                  </div>
+                )}
+              </div>
+              
+              {/* Conversation Preview Card */}
+              <div className="card">
+                <h3>Recent Conversations</h3>
+                <div className="preview-controls">
+                  <div className="filter-tabs">
+                    <button 
+                      className={`filter-tab ${memoryFilter === 'all' ? 'active' : ''}`}
+                      onClick={() => {
+                        setMemoryFilter('all')
+                        loadAllConversations()
+                      }}
+                    >
+                      All
+                    </button>
+                    <button 
+                      className={`filter-tab ${memoryFilter === 'user' ? 'active' : ''}`}
+                      onClick={() => setMemoryFilter('user')}
+                    >
+                      By User
+                    </button>
+                    <button 
+                      className={`filter-tab ${memoryFilter === 'channel' ? 'active' : ''}`}
+                      onClick={() => setMemoryFilter('channel')}
+                    >
+                      By Channel
+                    </button>
+                  </div>
+                  
+                  {memoryFilter === 'user' && (
+                    <div className="filter-input">
+                      <input
+                        type="text"
+                        value={selectedUser}
+                        onChange={(e) => setSelectedUser(e.target.value)}
+                        placeholder="Enter User ID"
+                        className="input"
+                      />
+                      <button 
+                        onClick={() => loadUserConversations(selectedUser)}
+                        disabled={!selectedUser.trim()}
+                        className="btn-filter"
+                      >
+                        Load
+                      </button>
+                    </div>
+                  )}
+                  
+                  {memoryFilter === 'channel' && (
+                    <div className="filter-input">
+                      <input
+                        type="text"
+                        value={selectedChannel}
+                        onChange={(e) => setSelectedChannel(e.target.value)}
+                        placeholder="Enter Channel ID"
+                        className="input"
+                      />
+                      <button 
+                        onClick={() => loadChannelConversations(selectedChannel)}
+                        disabled={!selectedChannel.trim()}
+                        className="btn-filter"
+                      >
+                        Load
+                      </button>
+                    </div>
+                  )}
+                </div>
+                
+                {conversationPreview.length === 0 ? (
+                  <div className="empty-state">
+                    <div className="empty-icon">💬</div>
+                    <p>No conversations found</p>
+                    <p className="empty-sub">{memoryFilter === 'all' ? 'Start chatting with the bot' : 'Select a filter to view conversations'}</p>
+                  </div>
+                ) : (
+                  <div className="conversations-list">
+                    {conversationPreview.map((conv, index) => (
+                      <div key={index} className="conversation-item">
+                        <div className="conversation-header">
+                          <span className="conversation-user">User: {conv.user_id.substring(0, 8)}...</span>
+                          <span className="conversation-channel">Channel: {conv.channel_id.substring(0, 8)}...</span>
+                          <span className="conversation-time">{formatDate(conv.created_at)}</span>
+                        </div>
+                        <div className="conversation-content">
+                          <div className="message user-message">
+                            <span className="message-label">User:</span>
+                            <p>{conv.user_message.substring(0, 100)}{conv.user_message.length > 100 ? '...' : ''}</p>
+                          </div>
+                          <div className="message bot-message">
+                            <span className="message-label">Bot:</span>
+                            <p>{conv.bot_response.substring(0, 100)}{conv.bot_response.length > 100 ? '...' : ''}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              
+              {/* Memory Controls Card */}
+              <div className="card">
+                <h3>Memory Controls</h3>
+                <p className="section-description">Manage conversation memory with precision</p>
+                
+                <div className="controls-grid">
+                  <div className="control-card">
+                    <div className="control-icon">👤</div>
+                    <div className="control-content">
+                      <h4>Clear User Memory</h4>
+                      <p>Remove all conversation history for a specific user</p>
+                      <div className="control-input">
+                        <input
+                          type="text"
+                          value={selectedUser}
+                          onChange={(e) => setSelectedUser(e.target.value)}
+                          placeholder="User ID"
+                          className="input"
+                        />
+                        <button 
+                          onClick={clearUserMemory}
+                          disabled={!selectedUser.trim()}
+                          className="btn-control"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="control-card">
+                    <div className="control-icon">#️⃣</div>
+                    <div className="control-content">
+                      <h4>Clear Channel Memory</h4>
+                      <p>Remove all conversation history for a specific channel</p>
+                      <div className="control-input">
+                        <input
+                          type="text"
+                          value={selectedChannel}
+                          onChange={(e) => setSelectedChannel(e.target.value)}
+                          placeholder="Channel ID"
+                          className="input"
+                        />
+                        <button 
+                          onClick={clearChannelMemory}
+                          disabled={!selectedChannel.trim()}
+                          className="btn-control"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Danger Zone Card */}
               <div className="card danger-zone">
                 <div className="danger-header">
                   <h3>⚠️ Danger Zone</h3>
                   <span className="danger-tag">Irreversible</span>
                 </div>
                 <p className="danger-desc">
-                  This will permanently delete all conversation history. The bot will lose all context.
+                  This will permanently delete ALL conversation history across all users and channels.
                 </p>
-                <button onClick={resetMemory} className="btn-danger">
-                  Reset All Conversations
-                </button>
-                <p className="danger-note">
-                  Note: This action cannot be undone. All conversation data will be permanently deleted.
-                </p>
+                <div className="danger-actions">
+                  <button onClick={resetMemory} className="btn-danger">
+                    Reset All Conversations
+                  </button>
+                  <p className="danger-note">
+                    Note: This action cannot be undone. All conversation data will be permanently deleted.
+                  </p>
+                </div>
               </div>
             </div>
           )}
@@ -1577,7 +2006,318 @@ export default function Dashboard() {
           line-height: 1.6;
         }
         
-        /* Danger Zone */
+        /* Memory Section Specific Styles */
+        .btn-refresh {
+          background: #333;
+          color: #fff;
+          padding: 6px 12px;
+          border-radius: 4px;
+          font-size: 13px;
+          font-weight: 500;
+        }
+        
+        .btn-refresh:hover:not(:disabled) {
+          background: #444;
+        }
+        
+        .btn-refresh:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        
+        .loading-skeleton {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        
+        .skeleton-row {
+          height: 60px;
+          background: linear-gradient(90deg, #1a1a1a 25%, #222 50%, #1a1a1a 75%);
+          background-size: 200% 100%;
+          animation: loading 1.5s infinite;
+          border-radius: 8px;
+        }
+        
+        @keyframes loading {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+        
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          gap: 16px;
+          margin-top: 16px;
+        }
+        
+        .stat-box {
+          background: #0a0a0a;
+          border: 1px solid #222;
+          border-radius: 8px;
+          padding: 20px;
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          transition: all 0.2s;
+        }
+        
+        .stat-box:hover {
+          border-color: #333;
+          transform: translateY(-2px);
+        }
+        
+        .stat-icon {
+          font-size: 24px;
+          opacity: 0.8;
+          width: 50px;
+          height: 50px;
+          background: rgba(88, 101, 242, 0.1);
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        
+        .stat-content {
+          flex: 1;
+        }
+        
+        .stat-value-large {
+          font-size: 24px;
+          font-weight: 600;
+          color: #fff;
+          margin-bottom: 4px;
+        }
+        
+        .stat-value-small {
+          font-size: 14px;
+          font-weight: 500;
+          color: #e0e0e0;
+          margin-bottom: 4px;
+        }
+        
+        /* Conversation Preview */
+        .preview-controls {
+          margin-bottom: 20px;
+        }
+        
+        .filter-tabs {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 16px;
+        }
+        
+        .filter-tab {
+          background: #0a0a0a;
+          border: 1px solid #222;
+          color: #888;
+          padding: 8px 16px;
+          border-radius: 4px;
+          font-size: 13px;
+          font-weight: 500;
+        }
+        
+        .filter-tab:hover {
+          background: #141414;
+          color: #fff;
+        }
+        
+        .filter-tab.active {
+          background: #5865F2;
+          color: #fff;
+          border-color: #5865F2;
+        }
+        
+        .filter-input {
+          display: flex;
+          gap: 12px;
+          align-items: center;
+        }
+        
+        .btn-filter {
+          background: #333;
+          color: #fff;
+          padding: 8px 16px;
+          border-radius: 4px;
+          font-size: 13px;
+          font-weight: 500;
+          white-space: nowrap;
+        }
+        
+        .btn-filter:hover:not(:disabled) {
+          background: #444;
+        }
+        
+        .btn-filter:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        
+        .conversations-list {
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          max-height: 400px;
+          overflow-y: auto;
+          padding-right: 8px;
+        }
+        
+        .conversation-item {
+          background: #0a0a0a;
+          border: 1px solid #222;
+          border-radius: 8px;
+          padding: 16px;
+          transition: all 0.2s;
+        }
+        
+        .conversation-item:hover {
+          border-color: #333;
+          background: #141414;
+        }
+        
+        .conversation-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 12px;
+          font-size: 12px;
+          color: #666;
+        }
+        
+        .conversation-user,
+        .conversation-channel,
+        .conversation-time {
+          background: #1a1a1a;
+          padding: 4px 8px;
+          border-radius: 4px;
+          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+        }
+        
+        .conversation-content {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        
+        .message {
+          display: flex;
+          gap: 8px;
+          align-items: flex-start;
+        }
+        
+        .message-label {
+          font-weight: 600;
+          font-size: 12px;
+          text-transform: uppercase;
+          padding: 2px 6px;
+          border-radius: 4px;
+          white-space: nowrap;
+        }
+        
+        .user-message .message-label {
+          background: rgba(52, 152, 219, 0.1);
+          color: #3498db;
+        }
+        
+        .bot-message .message-label {
+          background: rgba(46, 204, 113, 0.1);
+          color: #2ecc71;
+        }
+        
+        .message p {
+          flex: 1;
+          margin: 0;
+          color: #e0e0e0;
+          font-size: 13px;
+          line-height: 1.4;
+        }
+        
+        /* Memory Controls */
+        .controls-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+          gap: 20px;
+          margin-top: 20px;
+        }
+        
+        .control-card {
+          background: #0a0a0a;
+          border: 1px solid #222;
+          border-radius: 8px;
+          padding: 20px;
+          transition: all 0.2s;
+        }
+        
+        .control-card:hover {
+          border-color: #333;
+          transform: translateY(-2px);
+        }
+        
+        .control-icon {
+          font-size: 24px;
+          width: 50px;
+          height: 50px;
+          background: rgba(231, 76, 60, 0.1);
+          border-radius: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 16px;
+        }
+        
+        .control-card:nth-child(2) .control-icon {
+          background: rgba(52, 152, 219, 0.1);
+        }
+        
+        .control-content h4 {
+          font-size: 16px;
+          font-weight: 500;
+          color: #fff;
+          margin-bottom: 8px;
+        }
+        
+        .control-content p {
+          color: #888;
+          font-size: 13px;
+          margin-bottom: 16px;
+          line-height: 1.4;
+        }
+        
+        .control-input {
+          display: flex;
+          gap: 12px;
+        }
+        
+        .control-input .input {
+          flex: 1;
+        }
+        
+        .btn-control {
+          background: transparent;
+          color: #ff6b6b;
+          padding: 10px 20px;
+          border: 1px solid #ff6b6b;
+          border-radius: 4px;
+          font-weight: 500;
+          white-space: nowrap;
+        }
+        
+        .btn-control:hover:not(:disabled) {
+          background: rgba(255, 107, 107, 0.1);
+        }
+        
+        .btn-control:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+          border-color: #666;
+          color: #666;
+        }
+        
+        .danger-actions {
+          margin-top: 16px;
+        }
+        
         .danger-zone {
           margin-top: 0;
           padding-top: 0;
@@ -1617,6 +2357,25 @@ export default function Dashboard() {
           color: #666;
           margin-top: 16px;
           line-height: 1.4;
+        }
+        
+        /* Scrollbar Styling */
+        .conversations-list::-webkit-scrollbar {
+          width: 6px;
+        }
+        
+        .conversations-list::-webkit-scrollbar-track {
+          background: #0a0a0a;
+          border-radius: 3px;
+        }
+        
+        .conversations-list::-webkit-scrollbar-thumb {
+          background: #333;
+          border-radius: 3px;
+        }
+        
+        .conversations-list::-webkit-scrollbar-thumb:hover {
+          background: #444;
         }
         
         /* Responsive */
@@ -1702,6 +2461,28 @@ export default function Dashboard() {
           }
           
           .btn-add, .btn-save {
+            width: 100%;
+          }
+          
+          .stats-grid {
+            grid-template-columns: 1fr;
+          }
+          
+          .controls-grid {
+            grid-template-columns: 1fr;
+          }
+          
+          .conversation-header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+          }
+          
+          .filter-input {
+            flex-direction: column;
+          }
+          
+          .btn-filter, .btn-control {
             width: 100%;
           }
         }
