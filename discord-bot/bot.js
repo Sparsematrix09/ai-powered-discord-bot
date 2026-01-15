@@ -1,8 +1,8 @@
-// bot.js - COMPLETE UPDATED VERSION WITH ANALYTICS
+// bot.js - COMPLETE UPDATED VERSION WITH ALL COMMANDS
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 
 console.log('='.repeat(50));
@@ -11,7 +11,7 @@ console.log('📅', new Date().toISOString());
 console.log('='.repeat(50));
 
 // Check environment variables
-const requiredVars = ['DISCORD_TOKEN', 'HF_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY'];
+const requiredVars = ['DISCORD_TOKEN', 'HF_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'CLIPDROP_API_KEY'];
 let missingVars = [];
 requiredVars.forEach(varName => {
     if (!process.env[varName]) {
@@ -34,7 +34,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 console.log('🛢️  Supabase initialized');
 
-// ✅ CORRECT INTENTS FOR DISCORD.JS v14
+// Discord client
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -63,9 +63,30 @@ const conversationHistories = new Map();
 // HELPER FUNCTIONS
 // ====================
 
+async function isUserAdmin(userId) {
+    try {
+        const { data, error } = await supabase
+            .from('admin_users')
+            .select('discord_id')
+            .eq('discord_id', userId)
+            .single();
+        
+        if (error || !data) {
+            console.log(`⚠️ User ${userId} is not admin`);
+            return false;
+        }
+        
+        console.log(`✅ User ${userId} is admin`);
+        return true;
+    } catch (error) {
+        console.error('❌ Error checking admin status:', error);
+        return false;
+    }
+}
+
 async function getBotConfig() {
     try {
-        console.log('📋 Fetching bot configuration from Supabase...');
+        console.log('📋 Fetching bot configuration...');
         const { data, error } = await supabase
             .from('admin_settings')
             .select('*')
@@ -96,13 +117,10 @@ async function getBotConfig() {
 
 async function isChannelAllowed(channelId, allowedChannels) {
     if (!allowedChannels || allowedChannels.length === 0) {
-        console.log(`⚠️  No channel restrictions - allowing ${channelId}`);
         return true;
     }
     
-    const isAllowed = allowedChannels.includes(channelId);
-    console.log(`🔍 Channel ${channelId} allowed? ${isAllowed ? '✅' : '❌'}`);
-    return isAllowed;
+    return allowedChannels.includes(channelId);
 }
 
 function checkCooldown(userId, guildId) {
@@ -192,52 +210,470 @@ async function callHuggingFaceAPI(prompt, systemInstructions, history = []) {
     }
 }
 
-async function saveConversation(userId, channelId, userMessage, aiResponse, tokensUsed = 0, responseTime = 0) {
-    try {
-        // Get additional context
-        let user = null;
-        let channel = null;
-        let guild = null;
-        
-        try {
-            // Get user info
-            user = await client.users.fetch(userId).catch(() => null);
-            
-            // Get channel info
-            channel = await client.channels.fetch(channelId).catch(() => null);
-            
-            // Get guild info if available
-            if (channel && channel.guild) {
-                guild = channel.guild;
+// ====================
+// COMMAND HANDLERS
+// ====================
+
+// !help command
+async function handleHelpCommand(message) {
+    const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('🤖 Discord Copilot Commands')
+        .setDescription('Here are all available commands:')
+        .addFields(
+            {
+                name: '🔄 AI Chat Commands',
+                value: '```\n!ai [question] - Ask AI anything\n!ask [question] - Same as !ai\n```',
+                inline: false
+            },
+            {
+                name: '🎨 Image Generation',
+                value: '```\n!image [prompt] - Generate AI image\n!imagine [prompt] - Same as !image\n!gen [prompt] - Same as !image\n```',
+                inline: false
+            },
+            {
+                name: '⚙️ Utility Commands',
+                value: '```\n!help - Show this help message\n!ping - Check bot status\n!clear - Clear chat history in this channel\n```',
+                inline: false
+            },
+            {
+                name: '🛠️ Admin Commands',
+                value: '```\n!admin help - Show admin commands\n!admin stats - Show bot statistics\n!admin restart - Soft restart bot\n!admin channels - List allowed channels\n```',
+                inline: false
             }
-        } catch (fetchError) {
-            console.log('⚠️ Could not fetch Discord data:', fetchError.message);
-        }
-        
-        // Save to database with analytics
+        )
+        .setFooter({ text: 'Use !admin help for administrator commands' })
+        .setTimestamp();
+    
+    await message.reply({ embeds: [embed] });
+}
+
+// !ping command
+async function handlePingCommand(message) {
+    const start = Date.now();
+    const msg = await message.reply('🏓 Pinging...');
+    const latency = Date.now() - start;
+    
+    const embed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle('🏓 Pong!')
+        .setDescription(`Bot is online and responsive`)
+        .addFields(
+            { name: 'Latency', value: `${latency}ms`, inline: true },
+            { name: 'Uptime', value: `${Math.floor(process.uptime() / 60)} minutes`, inline: true },
+            { name: 'Status', value: '🟢 Online', inline: true }
+        )
+        .setTimestamp();
+    
+    await msg.edit({ content: '', embeds: [embed] });
+}
+
+// !clear command
+async function handleClearCommand(message) {
+    const channelId = message.channel.id;
+    
+    try {
+        // Clear conversation history from database
         const { error } = await supabase
             .from('conversations')
-            .insert({
-                user_id: userId,
-                user_name: user?.username || 'Unknown',
-                channel_id: channelId,
-                channel_name: channel?.name || 'Unknown',
-                guild_id: guild?.id || null,
-                guild_name: guild?.name || null,
-                user_message: userMessage,
-                ai_response: aiResponse,
-                tokens_used: tokensUsed,
-                response_time_ms: responseTime,
-                created_at: new Date().toISOString()
-            });
+            .delete()
+            .eq('channel_id', channelId);
         
         if (error) {
-            console.error('❌ Failed to save conversation:', error.message);
-        } else {
-            console.log('💾 Conversation saved with analytics data');
+            throw error;
         }
+        
+        // Also clear from memory cache
+        conversationHistories.forEach((history, userId) => {
+            // Keep user histories but they won't have channel context
+        });
+        
+        const embed = new EmbedBuilder()
+            .setColor(0x3498DB)
+            .setTitle('🗑️ Conversation Cleared')
+            .setDescription(`All conversation history has been cleared for this channel.`)
+            .setFooter({ text: 'New conversations will start fresh' })
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        
     } catch (error) {
-        console.error('❌ Database error:', error.message);
+        console.error('Clear command error:', error);
+        await message.reply('❌ Failed to clear conversation history.');
+    }
+}
+
+// !admin help command
+async function handleAdminHelpCommand(message) {
+    const isAdmin = await isUserAdmin(message.author.id);
+    
+    if (!isAdmin) {
+        return message.reply('❌ This command is for administrators only.');
+    }
+    
+    const embed = new EmbedBuilder()
+        .setColor(0xE74C3C)
+        .setTitle('🛠️ Admin Commands')
+        .setDescription('Administrator-only commands')
+        .addFields(
+            {
+                name: '📊 Information',
+                value: '```\n!admin stats - Show bot statistics\n!admin channels - List allowed channels\n```'
+            },
+            {
+                name: '⚙️ Management',
+                value: '```\n!admin restart - Soft restart bot\n!admin config - Show current configuration\n```'
+            },
+            {
+                name: 'ℹ️ Note',
+                value: 'Configure bot behavior at the [Admin Dashboard]'
+            }
+        )
+        .setFooter({ text: 'Discord Copilot Admin Console' })
+        .setTimestamp();
+    
+    await message.reply({ embeds: [embed] });
+}
+
+// !admin stats command
+async function handleAdminStatsCommand(message) {
+    const isAdmin = await isUserAdmin(message.author.id);
+    
+    if (!isAdmin) {
+        return message.reply('❌ This command is for administrators only.');
+    }
+    
+    try {
+        // Get statistics from database
+        const [conversations, images, settings] = await Promise.all([
+            supabase.from('conversations').select('id'),
+            supabase.from('image_generation_logs').select('id'),
+            supabase.from('admin_settings').select('allowed_channels').single()
+        ]);
+        
+        const embed = new EmbedBuilder()
+            .setColor(0x9B59B6)
+            .setTitle('📊 Bot Statistics')
+            .setDescription('Current usage and performance metrics')
+            .addFields(
+                { 
+                    name: '💬 Conversations', 
+                    value: `${conversations.data?.length || 0} total`, 
+                    inline: true 
+                },
+                { 
+                    name: '🎨 Images Generated', 
+                    value: `${images.data?.length || 0} total`, 
+                    inline: true 
+                },
+                { 
+                    name: '📁 Active Channels', 
+                    value: `${settings.data?.allowed_channels?.length || 0} channels`, 
+                    inline: true 
+                },
+                { 
+                    name: '⏱️ Bot Uptime', 
+                    value: `${Math.floor(process.uptime() / 3600)} hours`, 
+                    inline: true 
+                },
+                { 
+                    name: '👥 Active Users', 
+                    value: `${conversationHistories.size} in memory`, 
+                    inline: true 
+                },
+                { 
+                    name: '🔄 Cooldown Status', 
+                    value: `${userCooldowns.size} users on cooldown`, 
+                    inline: true 
+                }
+            )
+            .setFooter({ text: 'Updated just now' })
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        
+    } catch (error) {
+        console.error('Stats command error:', error);
+        await message.reply('❌ Failed to fetch statistics.');
+    }
+}
+
+// !admin channels command
+async function handleAdminChannelsCommand(message) {
+    const isAdmin = await isUserAdmin(message.author.id);
+    
+    if (!isAdmin) {
+        return message.reply('❌ This command is for administrators only.');
+    }
+    
+    try {
+        const config = await getBotConfig();
+        const allowedChannels = config.allowed_channels || [];
+        
+        let channelsList = 'No channels configured (bot responds everywhere)';
+        
+        if (allowedChannels.length > 0) {
+            channelsList = allowedChannels.map(channelId => {
+                const channel = message.guild?.channels.cache.get(channelId);
+                return channel ? `#${channel.name} (\`${channelId}\`)` : `\`${channelId}\` (channel not found)`;
+            }).join('\n');
+        }
+        
+        const embed = new EmbedBuilder()
+            .setColor(0xF1C40F)
+            .setTitle('📁 Allowed Channels')
+            .setDescription('Channels where the bot can respond')
+            .addFields({
+                name: `Active Channels (${allowedChannels.length})`,
+                value: channelsList
+            })
+            .setFooter({ text: 'Configure in Admin Dashboard' })
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        
+    } catch (error) {
+        console.error('Channels command error:', error);
+        await message.reply('❌ Failed to fetch channel list.');
+    }
+}
+
+// !admin restart command (soft restart)
+async function handleAdminRestartCommand(message) {
+    const isAdmin = await isUserAdmin(message.author.id);
+    
+    if (!isAdmin) {
+        return message.reply('❌ This command is for administrators only.');
+    }
+    
+    const embed = new EmbedBuilder()
+        .setColor(0xE67E22)
+        .setTitle('🔄 Bot Restarting')
+        .setDescription('Performing soft restart...')
+        .addFields(
+            { name: 'Status', value: '🟡 Restarting', inline: true },
+            { name: 'Type', value: 'Soft Restart', inline: true },
+            { name: 'Estimated Time', value: '5-10 seconds', inline: true }
+        )
+        .setFooter({ text: 'Bot will reconnect automatically' })
+        .setTimestamp();
+    
+    const restartMsg = await message.reply({ embeds: [embed] });
+    
+    // Clear caches
+    userCooldowns.clear();
+    guildCooldowns.clear();
+    conversationHistories.clear();
+    
+    // Update status
+    setTimeout(async () => {
+        const updatedEmbed = new EmbedBuilder()
+            .setColor(0x2ECC71)
+            .setTitle('✅ Bot Restarted')
+            .setDescription('Soft restart completed successfully')
+            .addFields(
+                { name: 'Status', value: '🟢 Online', inline: true },
+                { name: 'Caches Cleared', value: '✅', inline: true },
+                { name: 'Memory', value: '🔄 Refreshed', inline: true }
+            )
+            .setFooter({ text: 'Ready to process commands' })
+            .setTimestamp();
+        
+        await restartMsg.edit({ embeds: [updatedEmbed] });
+    }, 5000);
+}
+
+// !ask command (alias for !ai)
+async function handleAskCommand(message, args) {
+    // This will be handled in the main message handler
+    // We'll just redirect it to the AI handler
+}
+
+// ====================
+// IMAGE GENERATION FUNCTIONS
+// ====================
+
+function validateImagePrompt(prompt) {
+    if (!prompt || prompt.trim().length === 0) {
+        return { valid: false, reason: 'Prompt cannot be empty.' };
+    }
+    
+    if (prompt.length > 1000) {
+        return { valid: false, reason: 'Prompt is too long (max 1000 characters).' };
+    }
+    
+    const blockedTerms = ['nude', 'explicit', 'violence', 'porn', 'sexual', 'gore'];
+    const lowerPrompt = prompt.toLowerCase();
+    
+    for (const term of blockedTerms) {
+        if (lowerPrompt.includes(term)) {
+            return { valid: false, reason: 'Prompt contains blocked content.' };
+        }
+    }
+    
+    return { valid: true };
+}
+
+async function generateImage(prompt, settings) {
+    return new Promise((resolve) => {
+        try {
+            console.log(`🖼️ Generating image: "${prompt}"`);
+            
+            if (!settings.api_key) {
+                return resolve({
+                    success: false,
+                    error: 'Clipdrop API key not configured'
+                });
+            }
+            
+            const boundary = '----WebKitFormBoundary' + Date.now();
+            const body = `--${boundary}\r\n` +
+                         'Content-Disposition: form-data; name="prompt"\r\n\r\n' +
+                         `${prompt}\r\n` +
+                         `--${boundary}--\r\n`;
+            
+            const https = require('https');
+            const options = {
+                hostname: 'clipdrop-api.co',
+                path: '/text-to-image/v1',
+                method: 'POST',
+                headers: {
+                    'x-api-key': settings.api_key,
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                    'Content-Length': Buffer.byteLength(body)
+                }
+            };
+            
+            console.log('📡 Calling Clipdrop API...');
+            
+            const req = https.request(options, (res) => {
+                console.log(`📡 API Status: ${res.statusCode} ${res.statusMessage}`);
+                
+                const chunks = [];
+                res.on('data', (chunk) => chunks.push(chunk));
+                
+                res.on('end', () => {
+                    const buffer = Buffer.concat(chunks);
+                    
+                    const isImage = buffer.length > 8 && 
+                                   buffer[0] === 0x89 && buffer[1] === 0x50 && 
+                                   buffer[2] === 0x4E && buffer[3] === 0x47;
+                    
+                    if (res.statusCode === 200 && isImage) {
+                        console.log(`✅ Image generated (${buffer.length} bytes)`);
+                        resolve({
+                            success: true,
+                            imageBuffer: buffer
+                        });
+                    } else {
+                        const errorText = buffer.toString();
+                        console.error('❌ API Error:', errorText.substring(0, 200));
+                        
+                        let errorMsg = `API error: ${res.statusCode}`;
+                        try {
+                            const errorJson = JSON.parse(errorText);
+                            errorMsg = errorJson.error || errorJson.message || errorText;
+                        } catch {
+                            errorMsg = errorText || `HTTP ${res.statusCode}`;
+                        }
+                        
+                        resolve({
+                            success: false,
+                            error: errorMsg
+                        });
+                    }
+                });
+            });
+            
+            req.on('error', (error) => {
+                console.error('Request error:', error.message);
+                resolve({
+                    success: false,
+                    error: error.message
+                });
+            });
+            
+            req.write(body);
+            req.end();
+            
+        } catch (error) {
+            console.error('Image generation error:', error);
+            resolve({
+                success: false,
+                error: error.message
+            });
+        }
+    });
+}
+
+async function handleImageCommand(message, args) {
+    const channelId = message.channel.id;
+    const userId = message.author.id;
+    const username = message.author.username;
+    
+    try {
+        const prompt = args.join(' ');
+        
+        const validation = validateImagePrompt(prompt);
+        if (!validation.valid) {
+            return message.reply(`❌ ${validation.reason}`);
+        }
+        
+        const loadingMessage = await message.reply({
+            content: `🖼️ **Generating image for ${username}...**\n📝 **Prompt:** ${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}\n⏳ This may take 10-20 seconds...`,
+            allowedMentions: { repliedUser: false }
+        });
+        
+        const clipdropSettings = {
+            api_key: process.env.CLIPDROP_API_KEY
+        };
+        
+        console.log(`🎨 Image request from ${username}: "${prompt.substring(0, 50)}..."`);
+        const startTime = Date.now();
+        const result = await generateImage(prompt, clipdropSettings);
+        const processingTime = Date.now() - startTime;
+        
+        if (result.success) {
+            await loadingMessage.edit({
+                content: `✅ **Image generated for ${username}!**\n📝 **Prompt:** ${prompt}\n⏱️ **Time:** ${(processingTime / 1000).toFixed(1)}s`,
+                files: [{
+                    attachment: result.imageBuffer,
+                    name: `image_${Date.now()}.png`
+                }]
+            });
+            
+            console.log(`✅ Image sent to ${username} in ${processingTime}ms`);
+            
+            try {
+                await supabase
+                    .from('image_generation_logs')
+                    .insert([{
+                        user_id: userId,
+                        user_name: username,
+                        channel_id: channelId,
+                        prompt: prompt,
+                        model: 'clipdrop-text-to-image',
+                        size: '1024x1024',
+                        status: 'completed',
+                        processing_time_ms: processingTime
+                    }]);
+            } catch (dbError) {
+                console.log('⚠️ Could not log to database:', dbError.message);
+            }
+            
+        } else {
+            await loadingMessage.edit(`❌ Failed to generate image: ${result.error}`);
+            console.error(`❌ Image generation failed for ${username}: ${result.error}`);
+        }
+        
+    } catch (error) {
+        console.error('Image command error:', error);
+        
+        try {
+            await message.reply('❌ An error occurred while generating the image.');
+        } catch (e) {
+            console.error('Failed to send error message:', e.message);
+        }
     }
 }
 
@@ -252,12 +688,14 @@ client.once('ready', async () => {
     console.log(`👤 Users: ${client.users.cache.size}`);
     console.log('='.repeat(50));
     
-    const config = await getBotConfig();
+    await getBotConfig();
     
     client.user.setActivity({
-        name: `in ${client.guilds.cache.size} servers`,
-        type: 0 // PLAYING
+        name: `!help for commands`,
+        type: 0
     });
+    
+    console.log('🤖 Bot is ready with all commands!');
 });
 
 client.on('messageCreate', async (message) => {
@@ -265,32 +703,77 @@ client.on('messageCreate', async (message) => {
     
     console.log(`\n📨 ${message.author.username}: ${message.content.substring(0, 50)}`);
     
+    const content = message.content.toLowerCase();
+    
+    // Handle basic commands
+    if (content === '!help') {
+        return await handleHelpCommand(message);
+    }
+    
+    if (content === '!ping') {
+        return await handlePingCommand(message);
+    }
+    
+    if (content === '!clear') {
+        return await handleClearCommand(message);
+    }
+    
+    if (content.startsWith('!admin')) {
+        const args = message.content.split(' ');
+        const command = args[1];
+        
+        switch(command) {
+            case 'help':
+                return await handleAdminHelpCommand(message);
+            case 'stats':
+                return await handleAdminStatsCommand(message);
+            case 'restart':
+                return await handleAdminRestartCommand(message);
+            case 'channels':
+                return await handleAdminChannelsCommand(message);
+            default:
+                return await handleAdminHelpCommand(message);
+        }
+    }
+    
+    // Handle image commands
+    if (content.startsWith('!image') || content.startsWith('!gen') || content.startsWith('!imagine')) {
+        const args = message.content.split(' ').slice(1);
+        if (args.length === 0) {
+            return message.reply('Please provide a prompt. Usage: `!image <prompt>`');
+        }
+        return await handleImageCommand(message, args);
+    }
+    
+    // Handle AI chat (existing functionality)
     const config = await getBotConfig();
     
     const shouldRespond = 
         message.content.startsWith(CONFIG.COMMAND_PREFIX + 'ai') ||
+        message.content.startsWith(CONFIG.COMMAND_PREFIX + 'ask') ||
         (CONFIG.ALLOW_MENTIONS && message.mentions.has(client.user));
     
     if (!shouldRespond) {
-        console.log('   ⏩ Not addressed to bot');
         return;
     }
     
     let prompt = '';
     if (message.content.startsWith(CONFIG.COMMAND_PREFIX + 'ai')) {
         prompt = message.content.slice(CONFIG.COMMAND_PREFIX.length + 2).trim();
+    } else if (message.content.startsWith(CONFIG.COMMAND_PREFIX + 'ask')) {
+        prompt = message.content.slice(CONFIG.COMMAND_PREFIX.length + 3).trim();
     } else if (message.mentions.has(client.user)) {
         prompt = message.content.replace(`<@${client.user.id}>`, '').trim();
     }
     
     if (!prompt) {
-        return message.reply('Please provide a message.');
+        return message.reply('Please provide a message. Usage: `!ai [your question]` or `!ask [your question]`');
     }
     
     const cooldownCheck = checkCooldown(message.author.id, message.guild?.id || 'dm');
     if (!cooldownCheck.allowed) {
         const waitSeconds = Math.ceil(cooldownCheck.waitTime / 1000);
-        return message.reply(`Please wait ${waitSeconds}s`);
+        return message.reply(`Please wait ${waitSeconds}s before asking another question.`);
     }
     
     const channelAllowed = await isChannelAllowed(message.channel.id, config.allowed_channels);
@@ -302,7 +785,6 @@ client.on('messageCreate', async (message) => {
         updateCooldowns(message.author.id, message.guild?.id || 'dm');
         
         await message.channel.sendTyping();
-        console.log(`   ⌨️  Typing...`);
         
         const userId = message.author.id;
         if (!conversationHistories.has(userId)) {
@@ -310,12 +792,9 @@ client.on('messageCreate', async (message) => {
         }
         const history = conversationHistories.get(userId);
         
-        console.log(`   🤖 Processing...`);
         const startTime = Date.now();
-        
         const aiResponse = await callHuggingFaceAPI(prompt, config.system_instructions, history);
-        const endTime = Date.now();
-        const processingTime = endTime - startTime;
+        const processingTime = Date.now() - startTime;
         
         console.log(`   ✅ Response (${processingTime}ms, ${aiResponse.tokens} tokens)`);
         
@@ -328,19 +807,27 @@ client.on('messageCreate', async (message) => {
             history.splice(0, 2);
         }
         
-        // ✅ UPDATED: Save with analytics data
-        await saveConversation(
-            message.author.id,
-            message.channel.id,
-            prompt,
-            aiResponse.text,
-            aiResponse.tokens,
-            processingTime
-        );
+        // Save to database
+        try {
+            await supabase
+                .from('conversations')
+                .insert({
+                    user_id: message.author.id,
+                    user_name: message.author.username,
+                    channel_id: message.channel.id,
+                    channel_name: message.channel.name,
+                    user_message: prompt,
+                    ai_response: aiResponse.text,
+                    tokens_used: aiResponse.tokens,
+                    response_time_ms: processingTime
+                });
+        } catch (dbError) {
+            console.log('⚠️ Could not save conversation:', dbError.message);
+        }
         
+        // Send response
         if (aiResponse.text.length <= 2000) {
             await message.reply(aiResponse.text);
-            console.log(`   📤 Sent`);
         } else {
             const chunks = [];
             let remaining = aiResponse.text;
@@ -357,21 +844,17 @@ client.on('messageCreate', async (message) => {
             for (let i = 1; i < chunks.length; i++) {
                 await message.channel.send(chunks[i]);
             }
-            
-            console.log(`   📤 Sent in ${chunks.length} parts`);
         }
         
     } catch (error) {
         console.error(`   ❌ Error: ${error.message}`);
         
-        let errorMessage = 'Sorry, an error occurred.';
+        let errorMessage = 'Sorry, an error occurred while processing your request.';
         
         if (error.message.includes('Rate limit')) {
-            errorMessage = '⚠️ Rate limit exceeded.';
+            errorMessage = '⚠️ Rate limit exceeded. Please try again later.';
         } else if (error.message.includes('Model is loading')) {
-            errorMessage = '🔄 Model is loading. Try again in 30s.';
-        } else if (error.message.includes('API error: 401')) {
-            errorMessage = '🔑 API auth error.';
+            errorMessage = '🔄 Model is loading. Try again in 30 seconds.';
         }
         
         await message.reply(errorMessage);

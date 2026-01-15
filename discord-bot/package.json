@@ -11,6 +11,8 @@
     "axios": "^1.13.2",
     "discord.js": "^14.25.1",
     "dotenv": "^16.6.1",
+    "form-data": "^4.0.5",
+    "node-fetch": "^2.7.0",
     "supabase": "^1.226.4"
   }
 }

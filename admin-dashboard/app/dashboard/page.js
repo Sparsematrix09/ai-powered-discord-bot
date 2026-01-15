@@ -1,4 +1,3 @@
-// app/dashboard/page.js - Dark Professional UI
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
@@ -11,21 +10,32 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState(null)
-  const [conversationStats, setConversationStats] = useState({ total: 0, recent: 0 })
   const [activeSection, setActiveSection] = useState('instructions')
+  const [currentUser, setCurrentUser] = useState(null)
   const router = useRouter()
   const saveTimeoutRef = useRef(null)
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const isAdmin = localStorage.getItem('isAdmin')
-      if (!isAdmin) {
-        router.push('/')
-      }
+    // Check if user is authenticated (from localStorage)
+    const isAuthenticated = localStorage.getItem('isAuthenticated')
+    const userData = localStorage.getItem('user')
+    
+    if (!isAuthenticated || !userData) {
+      router.push('/')
+      return
     }
+    
+    try {
+      const user = JSON.parse(userData)
+      setCurrentUser(user)
+    } catch (error) {
+      console.error('Error parsing user data:', error)
+      router.push('/')
+      return
+    }
+    
     loadSettings()
-    loadStats()
-  }, [])
+  }, [router])
 
   const loadSettings = async () => {
     try {
@@ -35,7 +45,7 @@ export default function Dashboard() {
         .limit(1)
         .single()
       
-      if (error) throw error
+      if (error && error.code !== 'PGRST116') throw error
       
       if (data) {
         setInstructions(data.system_instructions || 'You are a helpful assistant. Be concise and professional.')
@@ -47,32 +57,18 @@ export default function Dashboard() {
     setIsLoading(false)
   }
 
-  const loadStats = async () => {
-    try {
-      const { count: total } = await supabase
-        .from('conversations')
-        .select('*', { count: 'exact', head: true })
-      
-      const recentCount = await supabase
-        .from('conversations')
-        .select('id')
-        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-        .then(({ count }) => count)
-      
-      setConversationStats({
-        total: total || 0,
-        recent: recentCount || 0
-      })
-    } catch (error) {
-      console.error('Error loading stats:', error)
-    }
-  }
-
   const saveSettings = async () => {
+    if (isSaving) return
+    
     setIsSaving(true)
     setSaveStatus(null)
     
     try {
+      // Validate instructions length
+      if (instructions.length > 4000) {
+        throw new Error('Instructions exceed 4000 character limit')
+      }
+
       const channelsArray = newChannel 
         ? [...channelList, newChannel.trim()].filter(c => c)
         : channelList
@@ -106,7 +102,7 @@ export default function Dashboard() {
       console.error(error)
       setSaveStatus({
         type: 'error',
-        message: 'Error saving settings. Please try again.'
+        message: error.message || 'Error saving settings. Please try again.'
       })
     } finally {
       setIsSaving(false)
@@ -129,15 +125,33 @@ export default function Dashboard() {
       if (error) throw error
       
       alert('All conversations have been reset.')
-      loadStats()
     } catch (error) {
       alert('Error resetting memory: ' + error.message)
     }
   }
 
   const logout = () => {
-    localStorage.removeItem('isAdmin')
+    // Clear localStorage
+    localStorage.removeItem('isAuthenticated')
+    localStorage.removeItem('user')
     router.push('/')
+  }
+
+  const addChannel = () => {
+    const channel = newChannel.trim()
+    if (!channel) return
+    
+    // Check for duplicates
+    if (channelList.includes(channel)) {
+      setSaveStatus({
+        type: 'error',
+        message: 'Channel already exists in the list'
+      })
+      return
+    }
+    
+    setChannelList([...channelList, channel])
+    setNewChannel('')
   }
 
   if (isLoading) {
@@ -165,24 +179,32 @@ export default function Dashboard() {
         
         <div className="nav-stats">
           <div className="stat-item">
-            <span className="stat-label">Today</span>
-            <span className="stat-value">{conversationStats.recent}</span>
+            <span className="stat-label">Channels</span>
+            <span className="stat-value">{channelList.length}</span>
           </div>
           <div className="stat-item">
-            <span className="stat-label">Total</span>
-            <span className="stat-value">{conversationStats.total}</span>
+            <span className="stat-label">Status</span>
+            <span className="stat-value status-active">● Active</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">Role</span>
+            <span className="stat-value role-badge-small">
+              {currentUser?.role || 'admin'}
+            </span>
           </div>
         </div>
         
         <div className="nav-actions">
           <button 
-            onClick={saveSettings} 
+            onClick={saveSettings}
             disabled={isSaving}
             className="btn-save"
+            title="Save current settings"
           >
             {isSaving ? 'Saving...' : 'Save Changes'}
           </button>
-          <button onClick={logout} className="btn-logout">
+          
+          <button onClick={logout} className="btn-logout" title="Logout">
             Logout
           </button>
         </div>
@@ -193,7 +215,9 @@ export default function Dashboard() {
         <div className={`alert ${saveStatus.type}`}>
           <span className="alert-icon">{saveStatus.type === 'success' ? '✓' : '!'}</span>
           <span>{saveStatus.message}</span>
-          <button onClick={() => setSaveStatus(null)} className="alert-close">×</button>
+          <button onClick={() => setSaveStatus(null)} className="alert-close" title="Dismiss">
+            ×
+          </button>
         </div>
       )}
 
@@ -205,6 +229,7 @@ export default function Dashboard() {
             <button 
               className={`menu-item ${activeSection === 'instructions' ? 'active' : ''}`}
               onClick={() => setActiveSection('instructions')}
+              title="Bot instructions and behavior"
             >
               <span className="menu-icon">📝</span>
               Instructions
@@ -212,17 +237,40 @@ export default function Dashboard() {
             <button 
               className={`menu-item ${activeSection === 'channels' ? 'active' : ''}`}
               onClick={() => setActiveSection('channels')}
+              title="Manage allowed channels"
             >
               <span className="menu-icon">#️⃣</span>
               Channels
             </button>
             <button 
+              className={`menu-item ${activeSection === 'commands' ? 'active' : ''}`}
+              onClick={() => setActiveSection('commands')}
+              title="Bot commands and actions"
+            >
+              <span className="menu-icon">⚡</span>
+              Commands
+            </button>
+            <button 
               className={`menu-item ${activeSection === 'memory' ? 'active' : ''}`}
               onClick={() => setActiveSection('memory')}
+              title="Conversation memory management"
             >
               <span className="menu-icon">🧠</span>
               Memory
             </button>
+          </div>
+          
+          {/* Current User Info */}
+          <div className="user-info-sidebar">
+            <div className="user-avatar-sidebar">
+              {currentUser?.username?.charAt(0)?.toUpperCase() || 'A'}
+            </div>
+            <div className="user-details">
+              <div className="user-name">{currentUser?.username || 'Admin'}</div>
+              <div className={`user-role role-${currentUser?.role || 'admin'}`}>
+                {currentUser?.role || 'admin'}
+              </div>
+            </div>
           </div>
         </aside>
 
@@ -239,7 +287,9 @@ export default function Dashboard() {
               <div className="card">
                 <div className="card-header">
                   <h3>System Prompt</h3>
-                  <div className="char-count">{instructions.length}/4000 chars</div>
+                  <div className={`char-count ${instructions.length > 4000 ? 'char-count-warning' : ''}`}>
+                    {instructions.length}/4000 chars
+                  </div>
                 </div>
                 <textarea
                   value={instructions}
@@ -256,6 +306,7 @@ export default function Dashboard() {
                     <div 
                       className="preset-card"
                       onClick={() => setInstructions('You are a professional assistant for a tech team. Provide accurate, concise answers. Focus on technical accuracy and clear explanations.')}
+                      title="Technical Assistant preset"
                     >
                       <h5>Technical Assistant</h5>
                       <p>Accurate, concise, technical</p>
@@ -263,6 +314,7 @@ export default function Dashboard() {
                     <div 
                       className="preset-card"
                       onClick={() => setInstructions('You are a helpful team assistant. Be friendly and encouraging. Help with brainstorming and creative problem solving. Use a casual but professional tone.')}
+                      title="Team Helper preset"
                     >
                       <h5>Team Helper</h5>
                       <p>Friendly, encouraging, creative</p>
@@ -270,6 +322,7 @@ export default function Dashboard() {
                     <div 
                       className="preset-card"
                       onClick={() => setInstructions('You are a strict documentation assistant. Provide only factual information from known sources. Be concise. No speculation. Use bullet points when appropriate.')}
+                      title="Documentation Bot preset"
                     >
                       <h5>Documentation Bot</h5>
                       <p>Factual, concise, no-nonsense</p>
@@ -297,15 +350,16 @@ export default function Dashboard() {
                     onChange={(e) => setNewChannel(e.target.value)}
                     placeholder="Enter Discord Channel ID"
                     className="input"
-                  />
-                  <button 
-                    onClick={() => {
-                      if (newChannel.trim()) {
-                        setChannelList([...channelList, newChannel.trim()])
-                        setNewChannel('')
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter') {
+                        addChannel()
                       }
                     }}
+                  />
+                  <button 
+                    onClick={addChannel}
                     className="btn-add"
+                    disabled={!newChannel.trim()}
                   >
                     Add
                   </button>
@@ -332,6 +386,7 @@ export default function Dashboard() {
                         <button 
                           onClick={() => removeChannel(index)}
                           className="btn-remove"
+                          title="Remove channel"
                         >
                           Remove
                         </button>
@@ -343,38 +398,230 @@ export default function Dashboard() {
             </div>
           )}
 
+          {/* Commands & Actions Section */}
+          {activeSection === 'commands' && (
+            <div className="section">
+              <div className="section-header">
+                <h2>Bot Commands & Actions</h2>
+                <p className="section-sub">Available commands and actions for your Discord bot</p>
+              </div>
+              
+              {/* Basic Commands Card */}
+              <div className="card">
+                <h3>Basic Commands</h3>
+                <p className="section-description">These commands are always available to users</p>
+                
+                <div className="commands-list">
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!help</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Show available commands and bot information</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!ping</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Check if the bot is online and responsive</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!ask [question]</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Ask the AI a question. The bot will respond with an intelligent answer based on your instructions.</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!clear</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Clear conversation history for the current channel</p>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Image Generation Commands Card */}
+              <div className="card">
+                <h3>Image Generation Commands</h3>
+                <p className="section-description">Generate AI images using Clipdrop API</p>
+                
+                <div className="commands-list">
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!image [prompt]</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Generate an image from text description. Uses Clipdrop API for high-quality images.</p>
+                    <div className="command-examples">
+                      <strong>Examples:</strong>
+                      <ul>
+                        <li><code>!image a cute cat wearing a hat</code></li>
+                        <li><code>!image futuristic cityscape at night, neon lights</code></li>
+                        <li><code>!image fantasy landscape with dragons, digital art</code></li>
+                      </ul>
+                    </div>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!gen [prompt]</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Alias for !image command. Generate images from text prompts.</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!imagine [prompt]</code>
+                      <span className="command-tag">User</span>
+                    </div>
+                    <p className="command-description">Another alias for !image command.</p>
+                  </div>
+                </div>
+                
+                <div className="image-tips">
+                  <h4>🎨 Image Generation Tips:</h4>
+                  <ul>
+                    <li>Be descriptive with details, colors, and lighting</li>
+                    <li>Specify art style (photorealistic, digital art, anime, etc.)</li>
+                    <li>Keep prompts under 1000 characters</li>
+                    <li>Images are generated at 1024x1024 resolution</li>
+                    <li>There's a daily limit per user (configured on server)</li>
+                  </ul>
+                </div>
+              </div>
+              
+              {/* Admin Commands Card */}
+              <div className="card">
+                <h3>Admin Commands</h3>
+                <p className="section-description">Commands available only to admin users</p>
+                
+                <div className="commands-list">
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!admin help</code>
+                      <span className="command-tag admin">Admin</span>
+                    </div>
+                    <p className="command-description">Show admin-only commands</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!admin stats</code>
+                      <span className="command-tag admin">Admin</span>
+                    </div>
+                    <p className="command-description">Show bot statistics and usage data</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!admin restart</code>
+                      <span className="command-tag admin">Admin</span>
+                    </div>
+                    <p className="command-description">Restart the bot (soft restart)</p>
+                  </div>
+                  
+                  <div className="command-item">
+                    <div className="command-header">
+                      <code>!admin channels</code>
+                      <span className="command-tag admin">Admin</span>
+                    </div>
+                    <p className="command-description">List all channels where the bot is active</p>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Command Usage Examples */}
+              <div className="card">
+                <h3>Usage Examples</h3>
+                
+                <div className="examples-grid">
+                  <div className="example-card">
+                    <h4>Basic Questions</h4>
+                    <ul>
+                      <li><code>!help</code> - See all commands</li>
+                      <li><code>!ping</code> - Check bot status</li>
+                      <li><code>!ask What is React?</code> - Ask technical questions</li>
+                      <li><code>!ask How do I deploy to Vercel?</code> - Get deployment help</li>
+                    </ul>
+                  </div>
+                  
+                  <div className="example-card">
+                    <h4>Image Generation</h4>
+                    <ul>
+                      <li><code>!image sunset over mountains</code> - Generate landscape</li>
+                      <li><code>!gen cyberpunk city street</code> - Create futuristic scenes</li>
+                      <li><code>!imagine cute robot pet</code> - Generate character art</li>
+                      <li><code>!image abstract geometric pattern</code> - Create abstract art</li>
+                    </ul>
+                  </div>
+                  
+                  <div className="example-card">
+                    <h4>Team Collaboration</h4>
+                    <ul>
+                      <li><code>!ask Brainstorm features for our app</code> - Brainstorming</li>
+                      <li><code>!ask Create a meeting agenda</code> - Meeting planning</li>
+                      <li><code>!ask Project timeline estimation</code> - Project planning</li>
+                      <li><code>!ask Team communication best practices</code> - Team guidance</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Bot Actions Card */}
+              <div className="card">
+                <h3>Bot Actions</h3>
+                <p className="section-description">Automatic actions the bot performs</p>
+                
+                <div className="actions-list">
+                  <div className="action-item">
+                    <div className="action-icon">💬</div>
+                    <div className="action-content">
+                      <h4>Conversation Memory</h4>
+                      <p>The bot remembers conversation context within each channel for 24 hours.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="action-item">
+                    <div className="action-icon">🖼️</div>
+                    <div className="action-content">
+                      <h4>Image Generation</h4>
+                      <p>AI image generation using Clipdrop API. Daily limits apply per user.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="action-item">
+                    <div className="action-icon">🔒</div>
+                    <div className="action-content">
+                      <h4>Channel Restrictions</h4>
+                      <p>Bot only responds in configured channels. Use !admin channels to check.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="action-item">
+                    <div className="action-icon">⚙️</div>
+                    <div className="action-content">
+                      <h4>Real-time Updates</h4>
+                      <p>Configuration changes take effect within 30 seconds.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Memory Section */}
           {activeSection === 'memory' && (
             <div className="section">
               <div className="section-header">
                 <h2>Memory Management</h2>
                 <p className="section-sub">Control conversation history and data</p>
-              </div>
-              
-              <div className="stats-grid">
-                <div className="stat-card">
-                  <div className="stat-icon">📊</div>
-                  <div className="stat-content">
-                    <div className="stat-number">{conversationStats.total}</div>
-                    <div className="stat-label">Total Conversations</div>
-                  </div>
-                </div>
-                
-                <div className="stat-card">
-                  <div className="stat-icon">🔄</div>
-                  <div className="stat-content">
-                    <div className="stat-number">{conversationStats.recent}</div>
-                    <div className="stat-label">Today's Activity</div>
-                  </div>
-                </div>
-                
-                <div className="stat-card">
-                  <div className="stat-icon">#️⃣</div>
-                  <div className="stat-content">
-                    <div className="stat-number">{channelList.length}</div>
-                    <div className="stat-label">Active Channels</div>
-                  </div>
-                </div>
               </div>
               
               <div className="card danger-zone">
@@ -491,6 +738,7 @@ export default function Dashboard() {
         .nav-stats {
           display: flex;
           gap: 24px;
+          align-items: center;
         }
         
         .stat-item {
@@ -512,9 +760,33 @@ export default function Dashboard() {
           color: #fff;
         }
         
+        .status-active {
+          color: #2ecc71;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        
+        .status-active::before {
+          content: '●';
+          font-size: 12px;
+        }
+        
+        .role-badge-small {
+          padding: 2px 8px;
+          border-radius: 12px;
+          font-size: 12px;
+          font-weight: 500;
+          text-transform: uppercase;
+          background: rgba(52, 152, 219, 0.1);
+          color: #3498db;
+          border: 1px solid rgba(52, 152, 219, 0.2);
+        }
+        
         .nav-actions {
           display: flex;
           gap: 12px;
+          align-items: center;
         }
         
         /* Buttons */
@@ -524,6 +796,7 @@ export default function Dashboard() {
           border: none;
           cursor: pointer;
           transition: all 0.2s;
+          outline: none;
         }
         
         .btn-save {
@@ -534,7 +807,7 @@ export default function Dashboard() {
           font-weight: 500;
         }
         
-        .btn-save:hover {
+        .btn-save:hover:not(:disabled) {
           background: #4752c4;
         }
         
@@ -542,6 +815,7 @@ export default function Dashboard() {
           background: #333;
           color: #666;
           cursor: not-allowed;
+          opacity: 0.6;
         }
         
         .btn-logout {
@@ -565,8 +839,14 @@ export default function Dashboard() {
           font-weight: 500;
         }
         
-        .btn-add:hover {
+        .btn-add:hover:not(:disabled) {
           background: #444;
+        }
+        
+        .btn-add:disabled {
+          background: #222;
+          color: #666;
+          cursor: not-allowed;
         }
         
         .btn-remove {
@@ -592,8 +872,15 @@ export default function Dashboard() {
           font-size: 15px;
         }
         
-        .btn-danger:hover {
+        .btn-danger:hover:not(:disabled) {
           background: rgba(255, 107, 107, 0.1);
+        }
+        
+        .btn-danger:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+          border-color: #666;
+          color: #666;
         }
         
         /* Alert */
@@ -647,6 +934,11 @@ export default function Dashboard() {
           display: flex;
           align-items: center;
           justify-content: center;
+          opacity: 0.7;
+        }
+        
+        .alert-close:hover {
+          opacity: 1;
         }
         
         /* Container */
@@ -661,6 +953,10 @@ export default function Dashboard() {
           background: #111;
           border-right: 1px solid #222;
           padding: 24px 0;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          flex-shrink: 0;
         }
         
         .menu-section {
@@ -686,11 +982,14 @@ export default function Dashboard() {
           color: #888;
           text-align: left;
           font-size: 14px;
+          border: none;
+          transition: all 0.2s;
         }
         
         .menu-item:hover {
           background: #1a1a1a;
           color: #fff;
+          cursor: pointer;
         }
         
         .menu-item.active {
@@ -705,15 +1004,78 @@ export default function Dashboard() {
           text-align: center;
         }
         
+        /* User Info Sidebar */
+        .user-info-sidebar {
+          padding: 16px 24px;
+          border-top: 1px solid #222;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+        
+        .user-avatar-sidebar {
+          width: 40px;
+          height: 40px;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 600;
+          font-size: 16px;
+          color: #fff;
+        }
+        
+        .user-details {
+          flex: 1;
+        }
+        
+        .user-name {
+          font-size: 14px;
+          font-weight: 500;
+          color: #fff;
+          margin-bottom: 2px;
+        }
+        
+        .user-role {
+          font-size: 11px;
+          font-weight: 500;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          padding: 2px 8px;
+          border-radius: 10px;
+          display: inline-block;
+        }
+        
+        .role-admin {
+          background: rgba(231, 76, 60, 0.1);
+          color: #e74c3c;
+          border: 1px solid rgba(231, 76, 60, 0.2);
+        }
+        
+        .role-moderator {
+          background: rgba(52, 152, 219, 0.1);
+          color: #3498db;
+          border: 1px solid rgba(52, 152, 219, 0.2);
+        }
+        
+        .role-viewer {
+          background: rgba(46, 204, 113, 0.1);
+          color: #2ecc71;
+          border: 1px solid rgba(46, 204, 113, 0.2);
+        }
+        
         /* Content */
         .content {
           flex: 1;
           padding: 32px;
           overflow-y: auto;
+          min-width: 0; /* Prevent flex overflow */
         }
         
         .section {
           max-width: 800px;
+          margin: 0 auto;
         }
         
         .section-header {
@@ -730,6 +1092,12 @@ export default function Dashboard() {
         .section-sub {
           color: #888;
           font-size: 14px;
+        }
+        
+        .section-description {
+          color: #888;
+          font-size: 14px;
+          margin-bottom: 24px;
         }
         
         /* Card */
@@ -759,6 +1127,17 @@ export default function Dashboard() {
           color: #666;
         }
         
+        .char-count-warning {
+          color: #ff6b6b;
+        }
+        
+        /* Save Button Container */
+        .save-button-container {
+          margin-top: 24px;
+          padding-top: 20px;
+          border-top: 1px solid #222;
+        }
+        
         /* Textarea */
         .textarea {
           width: 100%;
@@ -772,11 +1151,12 @@ export default function Dashboard() {
           line-height: 1.6;
           resize: vertical;
           margin-bottom: 24px;
+          transition: border-color 0.2s;
         }
         
         .textarea:focus {
           outline: none;
-          border-color: #444;
+          border-color: #5865F2;
         }
         
         /* Presets */
@@ -807,8 +1187,9 @@ export default function Dashboard() {
         }
         
         .preset-card:hover {
-          border-color: #444;
+          border-color: #5865F2;
           background: #141414;
+          transform: translateY(-2px);
         }
         
         .preset-card h5 {
@@ -825,6 +1206,18 @@ export default function Dashboard() {
         }
         
         /* Inputs */
+        .form-group {
+          margin-bottom: 20px;
+        }
+        
+        .form-label {
+          display: block;
+          font-size: 14px;
+          font-weight: 500;
+          color: #fff;
+          margin-bottom: 8px;
+        }
+        
         .input-group {
           display: flex;
           gap: 12px;
@@ -839,17 +1232,28 @@ export default function Dashboard() {
           color: #e0e0e0;
           padding: 10px 12px;
           font-size: 14px;
+          transition: border-color 0.2s;
         }
         
         .input:focus {
           outline: none;
-          border-color: #444;
+          border-color: #5865F2;
         }
         
         .input-help {
           font-size: 12px;
           color: #666;
           margin-top: 8px;
+          line-height: 1.4;
+        }
+        
+        .input-help a {
+          color: #5865F2;
+          text-decoration: none;
+        }
+        
+        .input-help a:hover {
+          text-decoration: underline;
         }
         
         /* Divider */
@@ -886,6 +1290,7 @@ export default function Dashboard() {
           display: flex;
           flex-direction: column;
           gap: 8px;
+          margin-top: 16px;
         }
         
         .channel-item {
@@ -896,6 +1301,11 @@ export default function Dashboard() {
           background: #0a0a0a;
           border: 1px solid #222;
           border-radius: 4px;
+          transition: border-color 0.2s;
+        }
+        
+        .channel-item:hover {
+          border-color: #333;
         }
         
         .channel-info {
@@ -908,6 +1318,7 @@ export default function Dashboard() {
           font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
           font-size: 13px;
           color: #888;
+          user-select: all;
         }
         
         .channel-status {
@@ -917,45 +1328,260 @@ export default function Dashboard() {
           letter-spacing: 0.5px;
         }
         
-        /* Stats Grid */
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-          gap: 16px;
-          margin-bottom: 32px;
+        /* Commands List */
+        .commands-list {
+          display: flex;
+          flex-direction: column;
+          gap: 24px;
+          margin-top: 20px;
         }
         
-        .stat-card {
-          background: #111;
+        .command-item {
+          background: #0a0a0a;
           border: 1px solid #222;
           border-radius: 8px;
           padding: 20px;
+          transition: all 0.2s;
+        }
+        
+        .command-item:hover {
+          border-color: #333;
+          transform: translateY(-2px);
+        }
+        
+        .command-header {
           display: flex;
           align-items: center;
-          gap: 16px;
+          gap: 12px;
+          margin-bottom: 12px;
         }
         
-        .stat-icon {
-          font-size: 24px;
-          opacity: 0.7;
+        .command-header code {
+          background: #222;
+          padding: 8px 16px;
+          border-radius: 4px;
+          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+          font-size: 15px;
+          color: #e0e0e0;
+          font-weight: 500;
         }
         
-        .stat-number {
-          font-size: 24px;
+        .command-tag {
+          padding: 4px 12px;
+          border-radius: 12px;
+          font-size: 11px;
           font-weight: 600;
-          color: #fff;
-        }
-        
-        .stat-label {
-          font-size: 12px;
-          color: #666;
           text-transform: uppercase;
           letter-spacing: 0.5px;
         }
         
+        .command-tag.user {
+          background: rgba(46, 204, 113, 0.1);
+          color: #2ecc71;
+          border: 1px solid rgba(46, 204, 113, 0.2);
+        }
+        
+        .command-tag.admin {
+          background: rgba(231, 76, 60, 0.1);
+          color: #e74c3c;
+          border: 1px solid rgba(231, 76, 60, 0.2);
+        }
+        
+        .command-description {
+          color: #888;
+          font-size: 14px;
+          line-height: 1.6;
+          margin-bottom: 12px;
+        }
+        
+        .command-examples {
+          margin-top: 16px;
+          padding: 16px;
+          background: rgba(0, 0, 0, 0.2);
+          border-radius: 6px;
+          border: 1px solid #333;
+        }
+        
+        .command-examples strong {
+          display: block;
+          margin-bottom: 8px;
+          color: #e0e0e0;
+          font-size: 13px;
+        }
+        
+        .command-examples ul {
+          list-style: none;
+          padding-left: 0;
+          margin: 0;
+        }
+        
+        .command-examples li {
+          margin-bottom: 6px;
+          color: #888;
+          font-size: 13px;
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+        }
+        
+        .command-examples li:before {
+          content: "›";
+          color: #5865F2;
+        }
+        
+        .command-examples code {
+          background: #222;
+          padding: 2px 6px;
+          border-radius: 4px;
+          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+          font-size: 12px;
+          color: #e0e0e0;
+        }
+        
+        /* Image Tips */
+        .image-tips {
+          margin-top: 24px;
+          padding: 20px;
+          background: rgba(88, 101, 242, 0.05);
+          border-radius: 8px;
+          border: 1px solid rgba(88, 101, 242, 0.1);
+        }
+        
+        .image-tips h4 {
+          font-size: 16px;
+          font-weight: 600;
+          color: #5865F2;
+          margin-bottom: 16px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        
+        .image-tips ul {
+          list-style: none;
+          padding-left: 0;
+        }
+        
+        .image-tips li {
+          margin-bottom: 8px;
+          color: #e0e0e0;
+          font-size: 14px;
+          position: relative;
+          padding-left: 20px;
+        }
+        
+        .image-tips li:before {
+          content: "✓";
+          color: #5865F2;
+          position: absolute;
+          left: 0;
+        }
+        
+        /* Examples Grid */
+        .examples-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+          gap: 20px;
+          margin-top: 20px;
+        }
+        
+        .example-card {
+          background: #0a0a0a;
+          border: 1px solid #222;
+          border-radius: 8px;
+          padding: 20px;
+        }
+        
+        .example-card h4 {
+          font-size: 14px;
+          font-weight: 600;
+          color: #fff;
+          margin-bottom: 12px;
+          border-bottom: 1px solid #222;
+          padding-bottom: 8px;
+        }
+        
+        .example-card ul {
+          list-style: none;
+          padding-left: 0;
+        }
+        
+        .example-card li {
+          margin-bottom: 8px;
+          color: #e0e0e0;
+          font-size: 13px;
+          display: flex;
+          align-items: flex-start;
+          gap: 8px;
+        }
+        
+        .example-card li:before {
+          content: "•";
+          color: #5865F2;
+        }
+        
+        .example-card code {
+          background: #222;
+          padding: 2px 6px;
+          border-radius: 4px;
+          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+          font-size: 12px;
+          color: #e0e0e0;
+          margin-right: 8px;
+        }
+        
+        /* Actions List */
+        .actions-list {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          margin-top: 20px;
+        }
+        
+        .action-item {
+          display: flex;
+          align-items: flex-start;
+          gap: 16px;
+          padding: 16px;
+          background: #0a0a0a;
+          border: 1px solid #222;
+          border-radius: 8px;
+          transition: all 0.2s;
+        }
+        
+        .action-item:hover {
+          border-color: #333;
+          transform: translateY(-2px);
+        }
+        
+        .action-icon {
+          font-size: 24px;
+          opacity: 0.7;
+          flex-shrink: 0;
+        }
+        
+        .action-content {
+          flex: 1;
+        }
+        
+        .action-content h4 {
+          font-size: 16px;
+          font-weight: 500;
+          color: #fff;
+          margin-bottom: 8px;
+        }
+        
+        .action-content p {
+          color: #888;
+          font-size: 14px;
+          line-height: 1.6;
+        }
+        
         /* Danger Zone */
         .danger-zone {
-          border-color: #444;
+          margin-top: 0;
+          padding-top: 0;
+          border-top: none;
         }
         
         .danger-header {
@@ -1011,6 +1637,7 @@ export default function Dashboard() {
             overflow-x: auto;
             gap: 8px;
             padding: 0 16px;
+            margin-bottom: 0;
           }
           
           .menu-title {
@@ -1021,11 +1648,15 @@ export default function Dashboard() {
             white-space: nowrap;
             padding: 8px 16px;
             border-radius: 4px;
+            border-left: none !important;
           }
           
           .menu-item.active {
-            border-left: none;
             background: #1a1a1a;
+          }
+          
+          .user-info-sidebar {
+            display: none;
           }
         }
         
@@ -1056,8 +1687,22 @@ export default function Dashboard() {
             grid-template-columns: 1fr;
           }
           
-          .stats-grid {
+          .examples-grid {
             grid-template-columns: 1fr;
+          }
+          
+          .command-item {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+          }
+          
+          .input-group {
+            flex-direction: column;
+          }
+          
+          .btn-add, .btn-save {
+            width: 100%;
           }
         }
       `}</style>
