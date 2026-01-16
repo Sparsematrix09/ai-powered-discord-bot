@@ -1,14 +1,38 @@
-// bot.js - COMPLETE UPDATED VERSION WITH ALL COMMANDS
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
+const express = require('express'); // Add this line
 
+// ====================
+// HEALTH CHECK SERVER (For Render)
+// ====================
+const app = express();
+const healthPort = process.env.HEALTH_PORT || 3001;
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    service: 'discord-copilot-bot',
+    version: '1.0.0'
+  });
+});
+
+app.listen(healthPort, () => {
+  console.log(`✅ Health check server running on port ${healthPort}`);
+});
+
+// ====================
+// ORIGINAL BOT CODE CONTINUES...
+// ====================
 console.log('='.repeat(50));
 console.log('🤖 DISCORD COPILOT BOT - STARTING');
 console.log('📅', new Date().toISOString());
 console.log('='.repeat(50));
+
+// Rest of your existing bot.js code continues...
 
 // Check environment variables
 const requiredVars = ['DISCORD_TOKEN', 'HF_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'CLIPDROP_API_KEY'];
@@ -1017,8 +1041,35 @@ client.login(process.env.DISCORD_TOKEN)
         process.exit(1);
     });
 
+// ====================
+// GRACEFUL SHUTDOWN HANDLER
+// ====================
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully...');
+  
+  const shutdown = async () => {
+    try {
+      console.log('👋 Saying goodbye to Discord...');
+      if (client && client.user) {
+        await client.destroy();
+        console.log('✅ Discord client destroyed');
+      }
+      
+      console.log('✅ Shutdown complete');
+      process.exit(0);
+    } catch (error) {
+      console.error('❌ Error during shutdown:', error);
+      process.exit(1);
+    }
+  };
+  
+  shutdown();
+});
+
 process.on('SIGINT', () => {
-    console.log('\n👋 Shutting down...');
+  console.log('\n👋 Ctrl+C detected, shutting down...');
+  if (client && client.user) {
     client.destroy();
-    process.exit(0);
+  }
+  process.exit(0);
 });
