@@ -9,23 +9,45 @@ const express = require('express'); // Add this line
 // HEALTH CHECK SERVER (For Render)
 // ====================
 const app = express();
-const healthPort = process.env.HEALTH_PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
+  res.status(200).json({
+    status: 'healthy',
     service: 'discord-copilot-bot',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
     version: '1.0.0'
   });
 });
 
-app.listen(healthPort, () => {
-  console.log(`✅ Health check server running on port ${healthPort}`);
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Discord Copilot Bot API',
+    endpoints: {
+      health: '/health',
+      status: '/status'
+    }
+  });
+});
+
+// Status endpoint
+app.get('/status', (req, res) => {
+  res.json({
+    discord: client?.user ? 'connected' : 'disconnected',
+    memory: process.memoryUsage(),
+    uptime: process.uptime()
+  });
+});
+
+// Start the HTTP server
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Railway health server running on port ${PORT}`);
 });
 
 // ====================
-// ORIGINAL BOT CODE CONTINUES...
+// YOUR ORIGINAL BOT CODE STARTS HERE
 // ====================
 console.log('='.repeat(50));
 console.log('🤖 DISCORD COPILOT BOT - STARTING');
