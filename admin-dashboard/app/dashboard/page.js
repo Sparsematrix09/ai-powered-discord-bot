@@ -16,13 +16,23 @@ export default function Dashboard() {
   const [selectedUser, setSelectedUser] = useState('')
   const [selectedChannel, setSelectedChannel] = useState('')
   const [memoryLoading, setMemoryLoading] = useState(false)
-  const [conversationPreview, setConversationPreview] = useState([])
-  const [memoryFilter, setMemoryFilter] = useState('all') // 'all', 'user', 'channel'
+  const [conversations, setConversations] = useState([])
+  const [filteredConversations, setFilteredConversations] = useState([])
+  const [conversationLoading, setConversationLoading] = useState(false)
+  const [selectedConversation, setSelectedConversation] = useState(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [dateFilter, setDateFilter] = useState('all')
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [uniqueUsers, setUniqueUsers] = useState([])
+  const [uniqueChannels, setUniqueChannels] = useState([])
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [conversationToDelete, setConversationToDelete] = useState(null)
   const router = useRouter()
   const saveTimeoutRef = useRef(null)
+  const ITEMS_PER_PAGE = 10
 
   useEffect(() => {
-    // Check if user is authenticated (from localStorage)
     const isAuthenticated = localStorage.getItem('isAuthenticated')
     const userData = localStorage.getItem('user')
     
@@ -35,14 +45,15 @@ export default function Dashboard() {
       const user = JSON.parse(userData)
       setCurrentUser(user)
     } catch (error) {
-      console.error('Error parsing user data:', error)
       router.push('/')
       return
     }
     
     loadSettings()
     loadMemoryStats()
-  }, [router])
+    loadConversations()
+    loadUniqueFilters()
+  }, [router, page])
 
   const loadSettings = async () => {
     try {
@@ -59,72 +70,145 @@ export default function Dashboard() {
         setChannelList(data.allowed_channels || [])
       }
     } catch (error) {
-      console.log('No settings found, using defaults')
+      // Default settings will be used
     }
     setIsLoading(false)
   }
 
   const loadMemoryStats = async () => {
-  setMemoryLoading(true);
-  try {
-    // Get conversation statistics
-    const { data: conversations, error: convError } = await supabase
-      .from('conversations')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(100);
-    
-    if (convError) throw convError;
-    
-    // Get unique users and channels
-    const { data: usersData, error: usersError } = await supabase
-      .from('conversations')
-      .select('user_id')
-      .order('created_at', { ascending: false });
-    
-    if (usersError) throw usersError;
-    
-    const { data: channelsData, error: channelsError } = await supabase
-      .from('conversations')
-      .select('channel_id')
-      .order('created_at', { ascending: false });
-    
-    if (channelsError) throw channelsError;
-    
-    // Transform conversations to use correct field names
-    const formattedConversations = conversations?.map(conv => ({
-      user_id: conv.user_id,
-      channel_id: conv.channel_id,
-      user_message: conv.user_message,
-      bot_response: conv.ai_response, // Map ai_response to bot_response
-      created_at: conv.created_at
-    })) || [];
-    
-    const stats = {
-      totalConversations: formattedConversations.length || 0,
-      uniqueUsers: new Set(usersData?.map(c => c.user_id)).size,
-      uniqueChannels: new Set(channelsData?.map(c => c.channel_id)).size,
-      oldestConversation: formattedConversations?.[formattedConversations.length - 1]?.created_at,
-      newestConversation: formattedConversations?.[0]?.created_at,
-      recentConversations: formattedConversations?.slice(0, 5) || []
-    };
-    
-    setMemoryStats(stats);
-    setConversationPreview(stats.recentConversations);
-  } catch (error) {
-    console.error('Error loading memory stats:', error);
-    setMemoryStats({
-      totalConversations: 0,
-      uniqueUsers: 0,
-      uniqueChannels: 0,
-      oldestConversation: null,
-      newestConversation: null,
-      recentConversations: []
-    });
-  } finally {
-    setMemoryLoading(false);
+    setMemoryLoading(true)
+    try {
+      const { data: conversations, error: convError } = await supabase
+        .from('conversations')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+      
+      if (convError) throw convError
+      
+      const { data: usersData } = await supabase
+        .from('conversations')
+        .select('user_id')
+      
+      const { data: channelsData } = await supabase
+        .from('conversations')
+        .select('channel_id')
+      
+      const formattedConversations = conversations?.map(conv => ({
+        id: conv.id,
+        user_id: conv.user_id,
+        channel_id: conv.channel_id,
+        user_message: conv.user_message,
+        bot_response: conv.ai_response,
+        created_at: conv.created_at
+      })) || []
+      
+      const stats = {
+        totalConversations: formattedConversations.length || 0,
+        uniqueUsers: new Set(usersData?.map(c => c.user_id)).size,
+        uniqueChannels: new Set(channelsData?.map(c => c.channel_id)).size,
+        newestConversation: formattedConversations?.[0]?.created_at,
+        recentConversations: formattedConversations?.slice(0, 5) || []
+      }
+      
+      setMemoryStats(stats)
+    } catch (error) {
+      setMemoryStats({
+        totalConversations: 0,
+        uniqueUsers: 0,
+        uniqueChannels: 0,
+        newestConversation: null,
+        recentConversations: []
+      })
+    } finally {
+      setMemoryLoading(false)
+    }
   }
-};
+
+  const loadConversations = async () => {
+    setConversationLoading(true)
+    try {
+      const from = (page - 1) * ITEMS_PER_PAGE
+      const to = from + ITEMS_PER_PAGE - 1
+      
+      let query = supabase
+        .from('conversations')
+        .select('*', { count: 'exact' })
+        .order('created_at', { ascending: false })
+        .range(from, to)
+
+      // Apply filters
+      if (selectedUser) {
+        query = query.eq('user_id', selectedUser)
+      }
+      if (selectedChannel) {
+        query = query.eq('channel_id', selectedChannel)
+      }
+      if (searchTerm) {
+        query = query.or(`user_message.ilike.%${searchTerm}%,ai_response.ilike.%${searchTerm}%`)
+      }
+      if (dateFilter !== 'all') {
+        const now = new Date()
+        let startDate = new Date()
+        
+        switch (dateFilter) {
+          case 'today':
+            startDate.setHours(0, 0, 0, 0)
+            break
+          case 'week':
+            startDate.setDate(now.getDate() - 7)
+            break
+          case 'month':
+            startDate.setMonth(now.getMonth() - 1)
+            break
+        }
+        
+        query = query.gte('created_at', startDate.toISOString())
+      }
+
+      const { data, error, count } = await query
+      
+      if (error) throw error
+      
+      const formattedData = data?.map(conv => ({
+        id: conv.id,
+        user_id: conv.user_id,
+        channel_id: conv.channel_id,
+        user_message: conv.user_message,
+        bot_response: conv.ai_response,
+        created_at: conv.created_at
+      })) || []
+      
+      setConversations(formattedData)
+      setFilteredConversations(formattedData)
+      setTotalPages(Math.ceil((count || 0) / ITEMS_PER_PAGE))
+    } catch (error) {
+      console.error('Error loading conversations:', error)
+      setConversations([])
+      setFilteredConversations([])
+    } finally {
+      setConversationLoading(false)
+    }
+  }
+
+  const loadUniqueFilters = async () => {
+    try {
+      const { data: users } = await supabase
+        .from('conversations')
+        .select('user_id')
+        .order('user_id')
+      
+      const { data: channels } = await supabase
+        .from('conversations')
+        .select('channel_id')
+        .order('channel_id')
+      
+      setUniqueUsers([...new Set(users?.map(u => u.user_id) || [])])
+      setUniqueChannels([...new Set(channels?.map(c => c.channel_id) || [])])
+    } catch (error) {
+      console.error('Error loading filters:', error)
+    }
+  }
 
   const saveSettings = async () => {
     if (isSaving) return
@@ -133,7 +217,6 @@ export default function Dashboard() {
     setSaveStatus(null)
     
     try {
-      // Validate instructions length
       if (instructions.length > 4000) {
         throw new Error('Instructions exceed 4000 character limit')
       }
@@ -159,19 +242,18 @@ export default function Dashboard() {
       
       setSaveStatus({
         type: 'success',
-        message: 'Settings saved. Bot will update within 30 seconds.'
+        message: 'Settings saved successfully.'
       })
       
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
       saveTimeoutRef.current = setTimeout(() => {
         setSaveStatus(null)
-      }, 5000)
+      }, 3000)
       
     } catch (error) {
-      console.error(error)
       setSaveStatus({
         type: 'error',
-        message: error.message || 'Error saving settings. Please try again.'
+        message: error.message || 'Error saving settings'
       })
     } finally {
       setIsSaving(false)
@@ -194,9 +276,11 @@ export default function Dashboard() {
       if (error) throw error
       
       alert('All conversations have been reset.')
-      loadMemoryStats() // Refresh stats
+      loadMemoryStats()
+      loadConversations()
+      loadUniqueFilters()
     } catch (error) {
-      alert('Error resetting memory: ' + error.message)
+      alert('Error resetting memory')
     }
   }
 
@@ -219,9 +303,12 @@ export default function Dashboard() {
       if (error) throw error
       
       alert(`Conversation history cleared for user ${selectedUser}`)
-      loadMemoryStats() // Refresh stats
+      loadMemoryStats()
+      loadConversations()
+      loadUniqueFilters()
+      setSelectedUser('')
     } catch (error) {
-      alert('Error clearing user memory: ' + error.message)
+      alert('Error clearing user memory')
     }
   }
 
@@ -244,106 +331,93 @@ export default function Dashboard() {
       if (error) throw error
       
       alert(`Conversation history cleared for channel ${selectedChannel}`)
-      loadMemoryStats() // Refresh stats
+      loadMemoryStats()
+      loadConversations()
+      loadUniqueFilters()
+      setSelectedChannel('')
     } catch (error) {
-      alert('Error clearing channel memory: ' + error.message)
+      alert('Error clearing channel memory')
     }
   }
 
-  const loadUserConversations = async (userId) => {
-  if (!userId) return;
-  
-  try {
-    const { data, error } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(10);
+  const deleteSingleConversation = async () => {
+    if (!conversationToDelete) return
     
-    if (error) throw error;
-    
-    // Transform the data
-    const formattedData = data?.map(conv => ({
-      user_id: conv.user_id,
-      channel_id: conv.channel_id,
-      user_message: conv.user_message,
-      bot_response: conv.ai_response, // Map ai_response to bot_response
-      created_at: conv.created_at
-    })) || [];
-    
-    setConversationPreview(formattedData);
-  } catch (error) {
-    console.error('Error loading user conversations:', error);
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .delete()
+        .eq('id', conversationToDelete.id)
+      
+      if (error) throw error
+      
+      // Remove from local state
+      setConversations(conversations.filter(c => c.id !== conversationToDelete.id))
+      setFilteredConversations(filteredConversations.filter(c => c.id !== conversationToDelete.id))
+      setSelectedConversation(null)
+      setShowDeleteConfirm(false)
+      setConversationToDelete(null)
+      
+      // Reload stats
+      loadMemoryStats()
+      
+      setSaveStatus({
+        type: 'success',
+        message: 'Conversation deleted successfully.'
+      })
+      
+      setTimeout(() => setSaveStatus(null), 3000)
+    } catch (error) {
+      setSaveStatus({
+        type: 'error',
+        message: 'Error deleting conversation'
+      })
+    }
   }
-};
 
- const loadChannelConversations = async (channelId) => {
-  if (!channelId) return;
-  
-  try {
-    const { data, error } = await supabase
-      .from('conversations')
-      .select('*')
-      .eq('channel_id', channelId)
-      .order('created_at', { ascending: false })
-      .limit(10);
-    
-    if (error) throw error;
-    
-    // Transform the data
-    const formattedData = data?.map(conv => ({
-      user_id: conv.user_id,
-      channel_id: conv.channel_id,
-      user_message: conv.user_message,
-      bot_response: conv.ai_response, // Map ai_response to bot_response
-      created_at: conv.created_at
-    })) || [];
-    
-    setConversationPreview(formattedData);
-  } catch (error) {
-    console.error('Error loading channel conversations:', error);
+  const viewConversation = (conversation) => {
+    setSelectedConversation(conversation)
   }
-};
 
-  
-const loadAllConversations = async () => {
-  try {
-    const { data, error } = await supabase
-      .from('conversations')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(10);
-    
-    if (error) throw error;
-    
-    // Transform the data
-    const formattedData = data?.map(conv => ({
-      user_id: conv.user_id,
-      channel_id: conv.channel_id,
-      user_message: conv.user_message,
-      bot_response: conv.ai_response, // Map ai_response to bot_response
-      created_at: conv.created_at
-    })) || [];
-    
-    setConversationPreview(formattedData);
-  } catch (error) {
-    console.error('Error loading all conversations:', error);
+  const handleFilter = () => {
+    setPage(1) // Reset to first page when filters change
+    loadConversations()
   }
-};
 
+  const clearFilters = () => {
+    setSelectedUser('')
+    setSelectedChannel('')
+    setSearchTerm('')
+    setDateFilter('all')
+    setPage(1)
+    loadConversations()
+  }
+
+  const exportConversations = () => {
+    const data = JSON.stringify(conversations, null, 2)
+    const blob = new Blob([data], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `conversations_${new Date().toISOString().split('T')[0]}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  // Add missing logout function
   const logout = () => {
-    // Clear localStorage
     localStorage.removeItem('isAuthenticated')
     localStorage.removeItem('user')
     router.push('/')
   }
 
+  // Add missing addChannel function
   const addChannel = () => {
     const channel = newChannel.trim()
     if (!channel) return
     
-    // Check for duplicates
     if (channelList.includes(channel)) {
       setSaveStatus({
         type: 'error',
@@ -356,2137 +430,710 @@ const loadAllConversations = async () => {
     setNewChannel('')
   }
 
-  // Format date for display
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A'
     const date = new Date(dateString)
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString()
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const truncateText = (text, length = 100) => {
+    if (!text) return ''
+    return text.length > length ? text.substring(0, length) + '...' : text
   }
 
   if (isLoading) {
     return (
-      <div className="loading">
-        <div className="loader"></div>
-        <p>Loading dashboard...</p>
+      <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-500 mb-4"></div>
+        <p className="text-gray-400">Loading dashboard...</p>
       </div>
     )
   }
 
   return (
-    <div className="dashboard">
-      {/* Navigation */}
-      <nav className="nav">
-        <div className="nav-brand">
-          <div className="logo">
-            <span className="logo-icon">DC</span>
-            <div className="logo-text">
-              <h1>Discord Copilot</h1>
-              <p className="brand-sub">Admin Console</p>
+    <div className="min-h-screen bg-gray-950 text-gray-100">
+      {/* Top Navigation */}
+      <header className="sticky top-0 z-50 bg-gray-900 border-b border-gray-800">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            {/* Logo with Image */}
+            <div className="flex items-center space-x-3">
+              <div className="flex items-center justify-center w-10 h-10 bg-transparent rounded-lg overflow-hidden">
+                <img 
+                  src="/logo.png" 
+                  alt="Discord Copilot Logo"
+                  className="w-full h-full object-contain"
+                  onError={(e) => {
+                    e.target.style.display = 'none'
+                    e.target.parentElement.innerHTML = `
+                      <div class="w-full h-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+                        <span class="font-bold text-white">DC</span>
+                      </div>
+                    `
+                  }}
+                />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold">Discord Copilot</h1>
+                <p className="text-sm text-gray-400">Admin Console</p>
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="flex items-center space-x-4 md:space-x-6">
+              <div className="text-center">
+                <p className="text-xs text-gray-400 uppercase">Channels</p>
+                <p className="text-lg font-semibold">{channelList.length}</p>
+              </div>
+              <div className="text-center">
+                <p className="text-xs text-gray-400 uppercase">Status</p>
+                <div className="flex items-center space-x-1">
+                  <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                  <span className="text-green-400 text-sm">Active</span>
+                </div>
+              </div>
+              <div className="text-center">
+                <p className="text-xs text-gray-400 uppercase">Role</p>
+                <span className="text-sm text-indigo-400">{currentUser?.role || 'admin'}</span>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center space-x-3">
+              <button
+                onClick={saveSettings}
+                disabled={isSaving}
+                className="px-4 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition disabled:opacity-50"
+              >
+                {isSaving ? 'Saving...' : 'Save'}
+              </button>
+              <button
+                onClick={logout}
+                className="px-4 py-2 border border-gray-700 text-gray-300 font-medium rounded-lg hover:bg-gray-800 transition"
+              >
+                Logout
+              </button>
             </div>
           </div>
         </div>
-        
-        <div className="nav-stats">
-          <div className="stat-item">
-            <span className="stat-label">Channels</span>
-            <span className="stat-value">{channelList.length}</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-label">Status</span>
-            <span className="stat-value status-active">● Active</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-label">Role</span>
-            <span className="stat-value role-badge-small">
-              {currentUser?.role || 'admin'}
-            </span>
-          </div>
-        </div>
-        
-        <div className="nav-actions">
-          <button 
-            onClick={saveSettings}
-            disabled={isSaving}
-            className="btn-save"
-            title="Save current settings"
-          >
-            {isSaving ? 'Saving...' : 'Save Changes'}
-          </button>
-          
-          <button onClick={logout} className="btn-logout" title="Logout">
-            Logout
-          </button>
-        </div>
-      </nav>
+      </header>
 
-      {/* Status Alert */}
+      {/* Status Toast */}
       {saveStatus && (
-        <div className={`alert ${saveStatus.type}`}>
-          <span className="alert-icon">{saveStatus.type === 'success' ? '✓' : '!'}</span>
-          <span>{saveStatus.message}</span>
-          <button onClick={() => setSaveStatus(null)} className="alert-close" title="Dismiss">
-            ×
-          </button>
+        <div className={`fixed top-20 right-4 z-50 px-4 py-3 rounded-lg border shadow-lg ${saveStatus.type === 'success' ? 'bg-green-500/10 border-green-500/20 text-green-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
+          <div className="flex items-center space-x-2">
+            <span>{saveStatus.type === 'success' ? '✓' : '⚠'}</span>
+            <span className="text-sm">{saveStatus.message}</span>
+          </div>
         </div>
       )}
 
-      <div className="container">
-        {/* Side Menu */}
-        <aside className="menu">
-          <div className="menu-section">
-            <h3 className="menu-title">Configuration</h3>
-            <button 
-              className={`menu-item ${activeSection === 'instructions' ? 'active' : ''}`}
-              onClick={() => setActiveSection('instructions')}
-              title="Bot instructions and behavior"
-            >
-              <span className="menu-icon">📝</span>
-              Instructions
-            </button>
-            <button 
-              className={`menu-item ${activeSection === 'channels' ? 'active' : ''}`}
-              onClick={() => setActiveSection('channels')}
-              title="Manage allowed channels"
-            >
-              <span className="menu-icon">#️⃣</span>
-              Channels
-            </button>
-            <button 
-              className={`menu-item ${activeSection === 'commands' ? 'active' : ''}`}
-              onClick={() => setActiveSection('commands')}
-              title="Bot commands and actions"
-            >
-              <span className="menu-icon">⚡</span>
-              Commands
-            </button>
-            <button 
-              className={`menu-item ${activeSection === 'memory' ? 'active' : ''}`}
-              onClick={() => setActiveSection('memory')}
-              title="Conversation memory management"
-            >
-              <span className="menu-icon">🧠</span>
-              Memory
-            </button>
-          </div>
-          
-          {/* Current User Info */}
-          <div className="user-info-sidebar">
-            <div className="user-avatar-sidebar">
-              {currentUser?.username?.charAt(0)?.toUpperCase() || 'A'}
-            </div>
-            <div className="user-details">
-              <div className="user-name">{currentUser?.username || 'Admin'}</div>
-              <div className={`user-role role-${currentUser?.role || 'admin'}`}>
-                {currentUser?.role || 'admin'}
-              </div>
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-lg p-6 max-w-md w-full">
+            <h3 className="text-lg font-semibold text-red-400 mb-2">Delete Conversation</h3>
+            <p className="text-gray-300 mb-4">
+              Are you sure you want to delete this conversation? This action cannot be undone.
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={deleteSingleConversation}
+                className="flex-1 py-2 bg-red-600 text-white rounded font-medium hover:bg-red-700 transition"
+              >
+                Delete
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="flex-1 py-2 border border-gray-700 text-gray-300 rounded font-medium hover:bg-gray-800 transition"
+              >
+                Cancel
+              </button>
             </div>
           </div>
-        </aside>
+        </div>
+      )}
 
-        {/* Main Content */}
-        <main className="content">
-          {/* Instructions Section */}
-          {activeSection === 'instructions' && (
-            <div className="section">
-              <div className="section-header">
-                <h2>Bot Instructions</h2>
-                <p className="section-sub">Define how your bot should behave and respond</p>
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="flex flex-col lg:flex-row gap-8">
+          {/* Sidebar Navigation */}
+          <aside className="lg:w-64">
+            <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <h3 className="text-sm font-medium text-gray-400 mb-3">Configuration</h3>
+              <div className="space-y-1">
+                <button
+                  onClick={() => setActiveSection('instructions')}
+                  className={`w-full text-left px-3 py-2 rounded text-sm ${activeSection === 'instructions' ? 'bg-indigo-500/10 text-indigo-400' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300'}`}
+                >
+                  Instructions
+                </button>
+                <button
+                  onClick={() => setActiveSection('channels')}
+                  className={`w-full text-left px-3 py-2 rounded text-sm ${activeSection === 'channels' ? 'bg-indigo-500/10 text-indigo-400' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300'}`}
+                >
+                  Channels
+                </button>
+                <button
+                  onClick={() => setActiveSection('commands')}
+                  className={`w-full text-left px-3 py-2 rounded text-sm ${activeSection === 'commands' ? 'bg-indigo-500/10 text-indigo-400' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300'}`}
+                >
+                  Commands
+                </button>
+                <button
+                  onClick={() => setActiveSection('memory')}
+                  className={`w-full text-left px-3 py-2 rounded text-sm ${activeSection === 'memory' ? 'bg-indigo-500/10 text-indigo-400' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-300'}`}
+                >
+                  Memory
+                </button>
               </div>
-              
-              <div className="card">
-                <div className="card-header">
-                  <h3>System Prompt</h3>
-                  <div className={`char-count ${instructions.length > 4000 ? 'char-count-warning' : ''}`}>
-                    {instructions.length}/4000 chars
-                  </div>
+            </div>
+
+            {/* User Info */}
+            <div className="mt-4 p-4 bg-gray-900 border border-gray-800 rounded-lg">
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center font-bold text-white text-sm">
+                  {currentUser?.username?.charAt(0)?.toUpperCase() || 'A'}
                 </div>
-                <textarea
-                  value={instructions}
-                  onChange={(e) => setInstructions(e.target.value)}
-                  placeholder="Example: You are a helpful assistant for our development team. Be concise, technical, and professional. Focus on code-related questions. If unsure, say so. Never share sensitive information."
-                  className="textarea"
-                  rows={12}
-                  maxLength={4000}
-                />
-                
-                <div className="presets">
-                  <h4>Quick Presets</h4>
-                  <div className="preset-grid">
-                    <div 
-                      className="preset-card"
-                      onClick={() => setInstructions('You are a professional assistant for a tech team. Provide accurate, concise answers. Focus on technical accuracy and clear explanations.')}
-                      title="Technical Assistant preset"
-                    >
-                      <h5>Technical Assistant</h5>
-                      <p>Accurate, concise, technical</p>
-                    </div>
-                    <div 
-                      className="preset-card"
-                      onClick={() => setInstructions('You are a helpful team assistant. Be friendly and encouraging. Help with brainstorming and creative problem solving. Use a casual but professional tone.')}
-                      title="Team Helper preset"
-                    >
-                      <h5>Team Helper</h5>
-                      <p>Friendly, encouraging, creative</p>
-                    </div>
-                    <div 
-                      className="preset-card"
-                      onClick={() => setInstructions('You are a strict documentation assistant. Provide only factual information from known sources. Be concise. No speculation. Use bullet points when appropriate.')}
-                      title="Documentation Bot preset"
-                    >
-                      <h5>Documentation Bot</h5>
-                      <p>Factual, concise, no-nonsense</p>
-                    </div>
-                  </div>
+                <div>
+                  <p className="font-medium text-sm">{currentUser?.username || 'Admin'}</p>
+                  <p className="text-xs text-gray-400">{currentUser?.role || 'admin'}</p>
                 </div>
               </div>
             </div>
-          )}
+          </aside>
 
-          {/* Channels Section */}
-          {activeSection === 'channels' && (
-            <div className="section">
-              <div className="section-header">
-                <h2>Channel Access</h2>
-                <p className="section-sub">Control which Discord channels the bot can respond in</p>
-              </div>
-              
-              <div className="card">
-                <h3>Add Channel</h3>
-                <div className="input-group">
-                  <input
-                    type="text"
-                    value={newChannel}
-                    onChange={(e) => setNewChannel(e.target.value)}
-                    placeholder="Enter Discord Channel ID"
-                    className="input"
-                    onKeyPress={(e) => {
-                      if (e.key === 'Enter') {
-                        addChannel()
-                      }
-                    }}
+          {/* Main Content */}
+          <main className="flex-1">
+            {/* Instructions Section */}
+            {activeSection === 'instructions' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-bold">Bot Instructions</h2>
+                  <p className="text-gray-400">Define how your bot should behave and respond</p>
+                </div>
+
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold">System Prompt</h3>
+                    <span className={`text-sm ${instructions.length > 4000 ? 'text-red-400' : 'text-gray-400'}`}>
+                      {instructions.length}/4000
+                    </span>
+                  </div>
+                  <textarea
+                    value={instructions}
+                    onChange={(e) => setInstructions(e.target.value)}
+                    placeholder="Example: You are a helpful assistant for our development team. Be concise, technical, and professional."
+                    className="w-full h-48 bg-gray-950 border border-gray-800 rounded-lg p-4 text-gray-200 font-mono text-sm focus:outline-none focus:border-indigo-500 resize-none"
+                    maxLength={4000}
                   />
-                  <button 
-                    onClick={addChannel}
-                    className="btn-add"
-                    disabled={!newChannel.trim()}
-                  >
-                    Add
-                  </button>
-                </div>
-                <p className="input-help">Right-click a Discord channel → "Copy ID" (Developer mode required)</p>
-                
-                <div className="divider"></div>
-                
-                <h3>Allowed Channels ({channelList.length})</h3>
-                {channelList.length === 0 ? (
-                  <div className="empty-state">
-                    <div className="empty-icon">#️⃣</div>
-                    <p>No channels added yet</p>
-                    <p className="empty-sub">Add channel IDs to restrict bot access</p>
+                  
+                  <div className="mt-6">
+                    <h4 className="text-gray-400 mb-3">Quick Presets</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setInstructions('You are a professional assistant for a tech team. Provide accurate, concise answers. Focus on technical accuracy.')}
+                        className="text-left p-3 bg-gray-950 border border-gray-800 rounded-lg hover:border-gray-700 transition"
+                      >
+                        <h5 className="font-medium text-gray-100 mb-1">Technical Assistant</h5>
+                        <p className="text-xs text-gray-400">Accurate, concise, technical</p>
+                      </button>
+                      <button
+                        onClick={() => setInstructions('You are a helpful team assistant. Be friendly and encouraging. Help with brainstorming and problem solving.')}
+                        className="text-left p-3 bg-gray-950 border border-gray-800 rounded-lg hover:border-gray-700 transition"
+                      >
+                        <h5 className="font-medium text-gray-100 mb-1">Team Helper</h5>
+                        <p className="text-xs text-gray-400">Friendly, encouraging, creative</p>
+                      </button>
+                    </div>
                   </div>
-                ) : (
-                  <div className="channels-list">
-                    {channelList.map((channel, index) => (
-                      <div key={index} className="channel-item">
-                        <div className="channel-info">
-                          <code className="channel-id">{channel}</code>
-                          <span className="channel-status">Active</span>
+                </div>
+              </div>
+            )}
+
+            {/* Channels Section */}
+            {activeSection === 'channels' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-bold">Channel Access</h2>
+                  <p className="text-gray-400">Control which Discord channels the bot can respond in</p>
+                </div>
+
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                  <h3 className="text-lg font-semibold mb-4">Add New Channel</h3>
+                  <div className="flex gap-3 mb-3">
+                    <input
+                      type="text"
+                      value={newChannel}
+                      onChange={(e) => setNewChannel(e.target.value)}
+                      placeholder="Enter Discord Channel ID"
+                      className="flex-1 bg-gray-950 border border-gray-800 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={addChannel}
+                      disabled={!newChannel.trim()}
+                      className="px-4 py-3 bg-gray-800 text-gray-200 font-medium rounded-lg hover:bg-gray-700 transition disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <p className="text-sm text-gray-500">Right-click a Discord channel → "Copy ID" (Developer mode required)</p>
+
+                  <div className="my-6 border-t border-gray-800"></div>
+
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold">Allowed Channels</h3>
+                    <span className="px-3 py-1 bg-gray-800 text-gray-400 text-sm rounded-full">{channelList.length} channels</span>
+                  </div>
+
+                  {channelList.length === 0 ? (
+                    <div className="text-center py-8">
+                      <p className="text-gray-400">No channels added yet</p>
+                      <p className="text-sm text-gray-500 mt-1">Add channel IDs to restrict bot access</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {channelList.map((channel, index) => (
+                        <div key={index} className="flex items-center justify-between p-4 bg-gray-950 border border-gray-800 rounded-lg">
+                          <div className="space-y-1">
+                            <code className="text-gray-200 font-mono text-sm block">{channel}</code>
+                            <div className="flex items-center space-x-2">
+                              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                              <span className="text-xs text-green-400">Active</span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => removeChannel(index)}
+                            className="px-3 py-1.5 text-red-400 hover:bg-red-500/10 transition rounded text-sm"
+                          >
+                            Remove
+                          </button>
                         </div>
-                        <button 
-                          onClick={() => removeChannel(index)}
-                          className="btn-remove"
-                          title="Remove channel"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Commands & Actions Section */}
-          {activeSection === 'commands' && (
-            <div className="section">
-              <div className="section-header">
-                <h2>Bot Commands & Actions</h2>
-                <p className="section-sub">Available commands and actions for your Discord bot</p>
-              </div>
-              
-              {/* Basic Commands Card */}
-              <div className="card">
-                <h3>Basic Commands</h3>
-                <p className="section-description">These commands are always available to users</p>
-                
-                <div className="commands-list">
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!help</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Show available commands and bot information</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!ping</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Check if the bot is online and responsive</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!ask [question]</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Ask the AI a question. The bot will respond with an intelligent answer based on your instructions.</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!clear</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Clear conversation history for the current channel</p>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Image Generation Commands Card */}
-              <div className="card">
-                <h3>Image Generation Commands</h3>
-                <p className="section-description">Generate AI images using Clipdrop API</p>
-                
-                <div className="commands-list">
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!image [prompt]</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Generate an image from text description. Uses Clipdrop API for high-quality images.</p>
-                    <div className="command-examples">
-                      <strong>Examples:</strong>
-                      <ul>
-                        <li><code>!image a cute cat wearing a hat</code></li>
-                        <li><code>!image futuristic cityscape at night, neon lights</code></li>
-                        <li><code>!image fantasy landscape with dragons, digital art</code></li>
-                      </ul>
-                    </div>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!gen [prompt]</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Alias for !image command. Generate images from text prompts.</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!imagine [prompt]</code>
-                      <span className="command-tag">User</span>
-                    </div>
-                    <p className="command-description">Another alias for !image command.</p>
-                  </div>
-                </div>
-                
-                <div className="image-tips">
-                  <h4>🎨 Image Generation Tips:</h4>
-                  <ul>
-                    <li>Be descriptive with details, colors, and lighting</li>
-                    <li>Specify art style (photorealistic, digital art, anime, etc.)</li>
-                    <li>Keep prompts under 1000 characters</li>
-                    <li>Images are generated at 1024x1024 resolution</li>
-                    <li>There's a daily limit per user (configured on server)</li>
-                  </ul>
-                </div>
-              </div>
-              
-              {/* Admin Commands Card */}
-              <div className="card">
-                <h3>Admin Commands</h3>
-                <p className="section-description">Commands available only to admin users</p>
-                
-                <div className="commands-list">
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!admin help</code>
-                      <span className="command-tag admin">Admin</span>
-                    </div>
-                    <p className="command-description">Show admin-only commands</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!admin stats</code>
-                      <span className="command-tag admin">Admin</span>
-                    </div>
-                    <p className="command-description">Show bot statistics and usage data</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!admin restart</code>
-                      <span className="command-tag admin">Admin</span>
-                    </div>
-                    <p className="command-description">Restart the bot (soft restart)</p>
-                  </div>
-                  
-                  <div className="command-item">
-                    <div className="command-header">
-                      <code>!admin channels</code>
-                      <span className="command-tag admin">Admin</span>
-                    </div>
-                    <p className="command-description">List all channels where the bot is active</p>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Command Usage Examples */}
-              <div className="card">
-                <h3>Usage Examples</h3>
-                
-                <div className="examples-grid">
-                  <div className="example-card">
-                    <h4>Basic Questions</h4>
-                    <ul>
-                      <li><code>!help</code> - See all commands</li>
-                      <li><code>!ping</code> - Check bot status</li>
-                      <li><code>!ask What is React?</code> - Ask technical questions</li>
-                      <li><code>!ask How do I deploy to Vercel?</code> - Get deployment help</li>
-                    </ul>
-                  </div>
-                  
-                  <div className="example-card">
-                    <h4>Image Generation</h4>
-                    <ul>
-                      <li><code>!image sunset over mountains</code> - Generate landscape</li>
-                      <li><code>!gen cyberpunk city street</code> - Create futuristic scenes</li>
-                      <li><code>!imagine cute robot pet</code> - Generate character art</li>
-                      <li><code>!image abstract geometric pattern</code> - Create abstract art</li>
-                    </ul>
-                  </div>
-                  
-                  <div className="example-card">
-                    <h4>Team Collaboration</h4>
-                    <ul>
-                      <li><code>!ask Brainstorm features for our app</code> - Brainstorming</li>
-                      <li><code>!ask Create a meeting agenda</code> - Meeting planning</li>
-                      <li><code>!ask Project timeline estimation</code> - Project planning</li>
-                      <li><code>!ask Team communication best practices</code> - Team guidance</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Bot Actions Card */}
-              <div className="card">
-                <h3>Bot Actions</h3>
-                <p className="section-description">Automatic actions the bot performs</p>
-                
-                <div className="actions-list">
-                  <div className="action-item">
-                    <div className="action-icon">💬</div>
-                    <div className="action-content">
-                      <h4>Conversation Memory</h4>
-                      <p>The bot remembers conversation context within each channel for 24 hours.</p>
-                    </div>
-                  </div>
-                  
-                  <div className="action-item">
-                    <div className="action-icon">🖼️</div>
-                    <div className="action-content">
-                      <h4>Image Generation</h4>
-                      <p>AI image generation using Clipdrop API. Daily limits apply per user.</p>
-                    </div>
-                  </div>
-                  
-                  <div className="action-item">
-                    <div className="action-icon">🔒</div>
-                    <div className="action-content">
-                      <h4>Channel Restrictions</h4>
-                      <p>Bot only responds in configured channels. Use !admin channels to check.</p>
-                    </div>
-                  </div>
-                  
-                  <div className="action-item">
-                    <div className="action-icon">⚙️</div>
-                    <div className="action-content">
-                      <h4>Real-time Updates</h4>
-                      <p>Configuration changes take effect within 30 seconds.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Memory Section - UPDATED */}
-          {activeSection === 'memory' && (
-            <div className="section">
-              <div className="section-header">
-                <h2>Memory Management</h2>
-                <p className="section-sub">Monitor and control conversation history and context</p>
-              </div>
-              
-              {/* Memory Statistics Card */}
-              <div className="card">
-                <div className="card-header">
-                  <h3>Memory Statistics</h3>
-                  <button 
-                    onClick={loadMemoryStats}
-                    disabled={memoryLoading}
-                    className="btn-refresh"
-                    title="Refresh statistics"
-                  >
-                    {memoryLoading ? 'Loading...' : '⟳ Refresh'}
-                  </button>
-                </div>
-                
-                {memoryLoading ? (
-                  <div className="loading-skeleton">
-                    <div className="skeleton-row"></div>
-                    <div className="skeleton-row"></div>
-                    <div className="skeleton-row"></div>
-                  </div>
-                ) : memoryStats ? (
-                  <div className="stats-grid">
-                    <div className="stat-box">
-                      <div className="stat-icon">💬</div>
-                      <div className="stat-content">
-                        <div className="stat-value-large">{memoryStats.totalConversations}</div>
-                        <div className="stat-label">Total Conversations</div>
-                      </div>
-                    </div>
-                    
-                    <div className="stat-box">
-                      <div className="stat-icon">👤</div>
-                      <div className="stat-content">
-                        <div className="stat-value-large">{memoryStats.uniqueUsers}</div>
-                        <div className="stat-label">Unique Users</div>
-                      </div>
-                    </div>
-                    
-                    <div className="stat-box">
-                      <div className="stat-icon">#️⃣</div>
-                      <div className="stat-content">
-                        <div className="stat-value-large">{memoryStats.uniqueChannels}</div>
-                        <div className="stat-label">Active Channels</div>
-                      </div>
-                    </div>
-                    
-                    <div className="stat-box">
-                      <div className="stat-icon">📅</div>
-                      <div className="stat-content">
-                        <div className="stat-value-small">{memoryStats.newestConversation ? formatDate(memoryStats.newestConversation) : 'N/A'}</div>
-                        <div className="stat-label">Last Activity</div>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="empty-state">
-                    <div className="empty-icon">📊</div>
-                    <p>No conversation data available</p>
-                    <p className="empty-sub">Start chatting with the bot to see statistics</p>
-                  </div>
-                )}
-              </div>
-              
-              {/* Conversation Preview Card */}
-              <div className="card">
-                <h3>Recent Conversations</h3>
-                <div className="preview-controls">
-                  <div className="filter-tabs">
-                    <button 
-                      className={`filter-tab ${memoryFilter === 'all' ? 'active' : ''}`}
-                      onClick={() => {
-                        setMemoryFilter('all')
-                        loadAllConversations()
-                      }}
-                    >
-                      All
-                    </button>
-                    <button 
-                      className={`filter-tab ${memoryFilter === 'user' ? 'active' : ''}`}
-                      onClick={() => setMemoryFilter('user')}
-                    >
-                      By User
-                    </button>
-                    <button 
-                      className={`filter-tab ${memoryFilter === 'channel' ? 'active' : ''}`}
-                      onClick={() => setMemoryFilter('channel')}
-                    >
-                      By Channel
-                    </button>
-                  </div>
-                  
-                  {memoryFilter === 'user' && (
-                    <div className="filter-input">
-                      <input
-                        type="text"
-                        value={selectedUser}
-                        onChange={(e) => setSelectedUser(e.target.value)}
-                        placeholder="Enter User ID"
-                        className="input"
-                      />
-                      <button 
-                        onClick={() => loadUserConversations(selectedUser)}
-                        disabled={!selectedUser.trim()}
-                        className="btn-filter"
-                      >
-                        Load
-                      </button>
-                    </div>
-                  )}
-                  
-                  {memoryFilter === 'channel' && (
-                    <div className="filter-input">
-                      <input
-                        type="text"
-                        value={selectedChannel}
-                        onChange={(e) => setSelectedChannel(e.target.value)}
-                        placeholder="Enter Channel ID"
-                        className="input"
-                      />
-                      <button 
-                        onClick={() => loadChannelConversations(selectedChannel)}
-                        disabled={!selectedChannel.trim()}
-                        className="btn-filter"
-                      >
-                        Load
-                      </button>
+                      ))}
                     </div>
                   )}
                 </div>
-                
-                {conversationPreview.length === 0 ? (
-                  <div className="empty-state">
-                    <div className="empty-icon">💬</div>
-                    <p>No conversations found</p>
-                    <p className="empty-sub">{memoryFilter === 'all' ? 'Start chatting with the bot' : 'Select a filter to view conversations'}</p>
-                  </div>
-                ) : (
-                  <div className="conversations-list">
-                    {conversationPreview.map((conv, index) => (
-                      <div key={index} className="conversation-item">
-                        <div className="conversation-header">
-                          <span className="conversation-user">User: {conv.user_id.substring(0, 8)}...</span>
-                          <span className="conversation-channel">Channel: {conv.channel_id.substring(0, 8)}...</span>
-                          <span className="conversation-time">{formatDate(conv.created_at)}</span>
-                        </div>
-                        <div className="conversation-content">
-                          <div className="message user-message">
-                            <span className="message-label">User:</span>
-                            <p>{conv.user_message.substring(0, 100)}{conv.user_message.length > 100 ? '...' : ''}</p>
-                          </div>
-                          <div className="message bot-message">
-                            <span className="message-label">Bot:</span>
-                            <p>{conv.bot_response.substring(0, 100)}{conv.bot_response.length > 100 ? '...' : ''}</p>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
-              
-              {/* Memory Controls Card */}
-              <div className="card">
-                <h3>Memory Controls</h3>
-                <p className="section-description">Manage conversation memory with precision</p>
-                
-                <div className="controls-grid">
-                  <div className="control-card">
-                    <div className="control-icon">👤</div>
-                    <div className="control-content">
-                      <h4>Clear User Memory</h4>
-                      <p>Remove all conversation history for a specific user</p>
-                      <div className="control-input">
-                        <input
-                          type="text"
+            )}
+
+            {/* Commands Section */}
+            {activeSection === 'commands' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-bold">Bot Commands</h2>
+                  <p className="text-gray-400">Available commands for your Discord bot</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Basic Commands */}
+                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold mb-4">Basic Commands</h3>
+                    <div className="space-y-4">
+                      {[
+                        { command: '!help', description: 'Show available commands and bot information' },
+                        { command: '!ping', description: 'Check if the bot is online and responsive' },
+                        { command: '!ask [question]', description: 'Ask the AI a question' },
+                        { command: '!clear', description: 'Clear conversation history for current channel' },
+                      ].map((cmd, idx) => (
+                        <div key={idx} className="p-3 bg-gray-950 border border-gray-800 rounded">
+                          <div className="flex items-center justify-between mb-1">
+                            <code className="text-gray-200 font-mono text-sm">{cmd.command}</code>
+                            <span className="text-xs px-2 py-0.5 bg-green-500/10 text-green-400 rounded">User</span>
+                          </div>
+                          <p className="text-sm text-gray-400">{cmd.description}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Image Commands */}
+                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold mb-4">Image Commands</h3>
+                    <div className="space-y-4">
+                      {[
+                        { command: '!image [prompt]', description: 'Generate image from text description' },
+                        { command: '!gen [prompt]', description: 'Alias for !image command' },
+                        { command: '!imagine [prompt]', description: 'Another alias for !image' },
+                      ].map((cmd, idx) => (
+                        <div key={idx} className="p-3 bg-gray-950 border border-gray-800 rounded">
+                          <div className="flex items-center justify-between mb-1">
+                            <code className="text-gray-200 font-mono text-sm">{cmd.command}</code>
+                            <span className="text-xs px-2 py-0.5 bg-green-500/10 text-green-400 rounded">User</span>
+                          </div>
+                          <p className="text-sm text-gray-400">{cmd.description}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Admin Commands */}
+                  <div className="md:col-span-2 bg-gray-900 border border-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold mb-4">Admin Commands</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {[
+                        { command: '!admin stats', description: 'Show bot statistics and usage data' },
+                        { command: '!admin help', description: 'Show admin-only commands' },
+                        { command: '!admin restart', description: 'Restart the bot (soft restart)' },
+                        { command: '!admin channels', description: 'List all channels where bot is active' },
+                      ].map((cmd, idx) => (
+                        <div key={idx} className="p-3 bg-gray-950 border border-gray-800 rounded">
+                          <div className="flex items-center justify-between mb-1">
+                            <code className="text-gray-200 font-mono text-sm">{cmd.command}</code>
+                            <span className="text-xs px-2 py-0.5 bg-red-500/10 text-red-400 rounded">Admin</span>
+                          </div>
+                          <p className="text-sm text-gray-400">{cmd.description}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Memory Section */}
+            {activeSection === 'memory' && (
+              <div className="space-y-6">
+                <div>
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                      <h2 className="text-2xl font-bold">Memory Management</h2>
+                      <p className="text-gray-400">Monitor and control conversation history</p>
+                    </div>
+                    <div className="flex items-center space-x-3">
+                      <button
+                        onClick={exportConversations}
+                        className="px-4 py-2 border border-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-800 transition"
+                      >
+                        Export JSON
+                      </button>
+                      <button
+                        onClick={loadConversations}
+                        disabled={conversationLoading}
+                        className="px-4 py-2 bg-gray-800 text-gray-200 text-sm rounded-lg hover:bg-gray-700 transition disabled:opacity-50"
+                      >
+                        {conversationLoading ? 'Loading...' : 'Refresh'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stats Grid */}
+                <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-lg font-semibold">Memory Statistics</h3>
+                    <div className="text-sm text-gray-400">
+                      Page {page} of {totalPages}
+                    </div>
+                  </div>
+
+                  {memoryStats ? (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                      <div className="p-4 bg-gray-950 border border-gray-800 rounded">
+                        <p className="text-2xl font-bold">{memoryStats.totalConversations}</p>
+                        <p className="text-sm text-gray-400">Total Conversations</p>
+                      </div>
+                      <div className="p-4 bg-gray-950 border border-gray-800 rounded">
+                        <p className="text-2xl font-bold">{memoryStats.uniqueUsers}</p>
+                        <p className="text-sm text-gray-400">Unique Users</p>
+                      </div>
+                      <div className="p-4 bg-gray-950 border border-gray-800 rounded">
+                        <p className="text-2xl font-bold">{memoryStats.uniqueChannels}</p>
+                        <p className="text-sm text-gray-400">Active Channels</p>
+                      </div>
+                      <div className="p-4 bg-gray-950 border border-gray-800 rounded">
+                        <p className="text-lg font-semibold">{memoryStats.newestConversation ? formatDate(memoryStats.newestConversation) : 'N/A'}</p>
+                        <p className="text-sm text-gray-400">Last Activity</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-center py-6">
+                      <p className="text-gray-400">No conversation data available</p>
+                    </div>
+                  )}
+
+                  {/* Filters */}
+                  <div className="mb-6 p-4 bg-gray-950 border border-gray-800 rounded-lg">
+                    <h4 className="text-gray-400 mb-3">Filter Conversations</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">User ID</label>
+                        <select
                           value={selectedUser}
                           onChange={(e) => setSelectedUser(e.target.value)}
-                          placeholder="User ID"
-                          className="input"
-                        />
-                        <button 
-                          onClick={clearUserMemory}
-                          disabled={!selectedUser.trim()}
-                          className="btn-control"
+                          className="w-full bg-gray-900 border border-gray-800 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
                         >
-                          Clear
-                        </button>
+                          <option value="">All Users</option>
+                          {uniqueUsers.map(userId => (
+                            <option key={userId} value={userId}>{userId}</option>
+                          ))}
+                        </select>
                       </div>
-                    </div>
-                  </div>
-                  
-                  <div className="control-card">
-                    <div className="control-icon">#️⃣</div>
-                    <div className="control-content">
-                      <h4>Clear Channel Memory</h4>
-                      <p>Remove all conversation history for a specific channel</p>
-                      <div className="control-input">
-                        <input
-                          type="text"
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Channel ID</label>
+                        <select
                           value={selectedChannel}
                           onChange={(e) => setSelectedChannel(e.target.value)}
-                          placeholder="Channel ID"
-                          className="input"
-                        />
-                        <button 
-                          onClick={clearChannelMemory}
-                          disabled={!selectedChannel.trim()}
-                          className="btn-control"
+                          className="w-full bg-gray-900 border border-gray-800 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
                         >
-                          Clear
-                        </button>
+                          <option value="">All Channels</option>
+                          {uniqueChannels.map(channelId => (
+                            <option key={channelId} value={channelId}>{channelId}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Time Range</label>
+                        <select
+                          value={dateFilter}
+                          onChange={(e) => setDateFilter(e.target.value)}
+                          className="w-full bg-gray-900 border border-gray-800 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
+                        >
+                          <option value="all">All Time</option>
+                          <option value="today">Today</option>
+                          <option value="week">Last 7 Days</option>
+                          <option value="month">Last 30 Days</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Search Text</label>
+                        <input
+                          type="text"
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          placeholder="Search messages..."
+                          className="w-full bg-gray-900 border border-gray-800 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-between mt-4">
+                      <button
+                        onClick={clearFilters}
+                        className="px-4 py-2 text-sm text-gray-400 hover:text-gray-300 transition"
+                      >
+                        Clear Filters
+                      </button>
+                      <button
+                        onClick={handleFilter}
+                        disabled={conversationLoading}
+                        className="px-4 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 transition disabled:opacity-50"
+                      >
+                        Apply Filters
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Conversations List */}
+                  <div className="space-y-3">
+                    {conversationLoading ? (
+                      <div className="text-center py-8">
+                        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500 mx-auto mb-4"></div>
+                        <p className="text-gray-400">Loading conversations...</p>
+                      </div>
+                    ) : conversations.length === 0 ? (
+                      <div className="text-center py-8">
+                        <p className="text-gray-400">No conversations found</p>
+                        <p className="text-sm text-gray-500 mt-1">Try adjusting your filters</p>
+                      </div>
+                    ) : (
+                      conversations.map(conv => (
+                        <div
+                          key={conv.id}
+                          className="p-4 bg-gray-950 border border-gray-800 rounded-lg hover:border-gray-700 transition cursor-pointer"
+                          onClick={() => viewConversation(conv)}
+                        >
+                          <div className="flex justify-between items-start mb-2">
+                            <div className="space-y-1">
+                              <div className="flex items-center space-x-2">
+                                <span className="text-sm text-gray-300">User:</span>
+                                <code className="text-xs bg-gray-800 px-2 py-1 rounded">{conv.user_id}</code>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-sm text-gray-300">Channel:</span>
+                                <code className="text-xs bg-gray-800 px-2 py-1 rounded">{conv.channel_id}</code>
+                              </div>
+                            </div>
+                            <div className="text-xs text-gray-500">{formatDate(conv.created_at)}</div>
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            <div>
+                              <span className="text-xs text-gray-500">User:</span>
+                              <p className="text-sm text-gray-300 mt-1">{truncateText(conv.user_message, 150)}</p>
+                            </div>
+                            <div>
+                              <span className="text-xs text-gray-500">Bot:</span>
+                              <p className="text-sm text-gray-300 mt-1">{truncateText(conv.bot_response, 150)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  {/* Pagination */}
+                  {totalPages > 1 && (
+                    <div className="flex justify-center items-center space-x-4 mt-6">
+                      <button
+                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                        disabled={page === 1 || conversationLoading}
+                        className="px-4 py-2 border border-gray-800 text-gray-300 rounded hover:bg-gray-800 transition disabled:opacity-50"
+                      >
+                        Previous
+                      </button>
+                      <span className="text-sm text-gray-400">
+                        Page {page} of {totalPages}
+                      </span>
+                      <button
+                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                        disabled={page === totalPages || conversationLoading}
+                        className="px-4 py-2 border border-gray-800 text-gray-300 rounded hover:bg-gray-800 transition disabled:opacity-50"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Conversation Detail Modal */}
+                {selectedConversation && (
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-gray-900 border border-gray-800 rounded-lg max-w-4xl w-full max-h-[80vh] overflow-hidden">
+                      <div className="flex items-center justify-between p-6 border-b border-gray-800">
+                        <div>
+                          <h3 className="text-lg font-semibold">Conversation Details</h3>
+                          <div className="flex items-center space-x-4 mt-1">
+                            <div className="text-sm text-gray-400">
+                              <span className="text-gray-300">User:</span>{' '}
+                              <code className="ml-1 bg-gray-800 px-2 py-0.5 rounded">{selectedConversation.user_id}</code>
+                            </div>
+                            <div className="text-sm text-gray-400">
+                              <span className="text-gray-300">Channel:</span>{' '}
+                              <code className="ml-1 bg-gray-800 px-2 py-0.5 rounded">{selectedConversation.channel_id}</code>
+                            </div>
+                            <div className="text-sm text-gray-400">
+                              {formatDate(selectedConversation.created_at)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-3">
+                          <button
+                            onClick={() => {
+                              setConversationToDelete(selectedConversation)
+                              setShowDeleteConfirm(true)
+                            }}
+                            className="px-3 py-1.5 text-red-400 hover:bg-red-500/10 transition rounded text-sm"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={() => setSelectedConversation(null)}
+                            className="px-3 py-1.5 text-gray-400 hover:bg-gray-800 transition rounded text-sm"
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                      <div className="p-6 overflow-y-auto max-h-[60vh] space-y-6">
+                        <div>
+                          <div className="flex items-center space-x-2 mb-3">
+                            <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center font-bold text-white text-sm">
+                              U
+                            </div>
+                            <span className="font-medium text-gray-300">User Message</span>
+                          </div>
+                          <div className="ml-10 p-4 bg-gray-950 border border-gray-800 rounded-lg">
+                            <p className="text-gray-200 whitespace-pre-wrap">{selectedConversation.user_message}</p>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="flex items-center space-x-2 mb-3">
+                            <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-blue-500 rounded-full flex items-center justify-center font-bold text-white text-sm">
+                              B
+                            </div>
+                            <span className="font-medium text-gray-300">Bot Response</span>
+                          </div>
+                          <div className="ml-10 p-4 bg-gray-950 border border-indigo-500/20 rounded-lg">
+                            <p className="text-gray-200 whitespace-pre-wrap">{selectedConversation.bot_response}</p>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
+                )}
+
+                {/* Management Actions */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* User Memory Management */}
+                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold text-red-400 mb-4">Clear User Memory</h3>
+                    <p className="text-gray-300 mb-4 text-sm">
+                      Delete all conversation history for a specific user
+                    </p>
+                    <div className="space-y-3">
+                      <select
+                        value={selectedUser}
+                        onChange={(e) => setSelectedUser(e.target.value)}
+                        className="w-full bg-gray-950 border border-gray-800 rounded px-3 py-2 text-gray-200 focus:outline-none focus:border-red-500"
+                      >
+                        <option value="">Select a user...</option>
+                        {uniqueUsers.map(userId => (
+                          <option key={userId} value={userId}>{userId}</option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={clearUserMemory}
+                        disabled={!selectedUser}
+                        className="w-full py-3 text-red-400 border-2 border-red-500/30 rounded font-medium hover:bg-red-500/10 transition disabled:opacity-50"
+                      >
+                        Clear User History
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Channel Memory Management */}
+                  <div className="bg-gray-900 border border-gray-800 rounded-lg p-6">
+                    <h3 className="text-lg font-semibold text-red-400 mb-4">Clear Channel Memory</h3>
+                    <p className="text-gray-300 mb-4 text-sm">
+                      Delete all conversation history for a specific channel
+                    </p>
+                    <div className="space-y-3">
+                      <select
+                        value={selectedChannel}
+                        onChange={(e) => setSelectedChannel(e.target.value)}
+                        className="w-full bg-gray-950 border border-gray-800 rounded px-3 py-2 text-gray-200 focus:outline-none focus:border-red-500"
+                      >
+                        <option value="">Select a channel...</option>
+                        {uniqueChannels.map(channelId => (
+                          <option key={channelId} value={channelId}>{channelId}</option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={clearChannelMemory}
+                        disabled={!selectedChannel}
+                        className="w-full py-3 text-red-400 border-2 border-red-500/30 rounded font-medium hover:bg-red-500/10 transition disabled:opacity-50"
+                      >
+                        Clear Channel History
+                      </button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              
-              {/* Danger Zone Card */}
-              <div className="card danger-zone">
-                <div className="danger-header">
-                  <h3>⚠️ Danger Zone</h3>
-                  <span className="danger-tag">Irreversible</span>
-                </div>
-                <p className="danger-desc">
-                  This will permanently delete ALL conversation history across all users and channels.
-                </p>
-                <div className="danger-actions">
-                  <button onClick={resetMemory} className="btn-danger">
+
+                {/* Danger Zone */}
+                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-6">
+                  <h3 className="text-lg font-semibold text-red-400 mb-4">Danger Zone</h3>
+                  <p className="text-gray-300 mb-6 text-sm">
+                    This will permanently delete ALL conversation history. This action cannot be undone.
+                  </p>
+                  <button
+                    onClick={resetMemory}
+                    className="w-full py-3 text-red-400 border-2 border-red-500/30 rounded font-medium hover:bg-red-500/20 transition"
+                  >
                     Reset All Conversations
                   </button>
-                  <p className="danger-note">
-                    Note: This action cannot be undone. All conversation data will be permanently deleted.
-                  </p>
                 </div>
               </div>
-            </div>
-          )}
-        </main>
+            )}
+          </main>
+        </div>
       </div>
-
-      <style jsx>{`
-        /* Reset & Base */
-        * {
-          margin: 0;
-          padding: 0;
-          box-sizing: border-box;
-        }
-        
-        .dashboard {
-          min-height: 100vh;
-          background: #0a0a0a;
-          color: #e0e0e0;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-          line-height: 1.6;
-        }
-        
-        /* Loading */
-        .loading {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          color: #666;
-        }
-        
-        .loader {
-          width: 40px;
-          height: 40px;
-          border: 3px solid #333;
-          border-top-color: #666;
-          border-radius: 50%;
-          animation: spin 1s linear infinite;
-          margin-bottom: 20px;
-        }
-        
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-        
-        /* Navigation */
-        .nav {
-          background: #111;
-          border-bottom: 1px solid #222;
-          padding: 0 24px;
-          height: 64px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          position: sticky;
-          top: 0;
-          z-index: 100;
-        }
-        
-        .nav-brand {
-          display: flex;
-          align-items: center;
-        }
-        
-        .logo {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-        
-        .logo-icon {
-          width: 36px;
-          height: 36px;
-          background: linear-gradient(135deg, #5865F2, #9146FF);
-          border-radius: 8px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-weight: 600;
-          font-size: 14px;
-          color: white;
-        }
-        
-        .logo-text h1 {
-          font-size: 18px;
-          font-weight: 600;
-          color: #fff;
-          margin: 0;
-        }
-        
-        .brand-sub {
-          font-size: 12px;
-          color: #888;
-          margin: 0;
-        }
-        
-        .nav-stats {
-          display: flex;
-          gap: 24px;
-          align-items: center;
-        }
-        
-        .stat-item {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-        }
-        
-        .stat-label {
-          font-size: 11px;
-          text-transform: uppercase;
-          color: #888;
-          letter-spacing: 0.5px;
-        }
-        
-        .stat-value {
-          font-size: 16px;
-          font-weight: 600;
-          color: #fff;
-        }
-        
-        .status-active {
-          color: #2ecc71;
-          display: flex;
-          align-items: center;
-          gap: 4px;
-        }
-        
-        .status-active::before {
-          content: '●';
-          font-size: 12px;
-        }
-        
-        .role-badge-small {
-          padding: 2px 8px;
-          border-radius: 12px;
-          font-size: 12px;
-          font-weight: 500;
-          text-transform: uppercase;
-          background: rgba(52, 152, 219, 0.1);
-          color: #3498db;
-          border: 1px solid rgba(52, 152, 219, 0.2);
-        }
-        
-        .nav-actions {
-          display: flex;
-          gap: 12px;
-          align-items: center;
-        }
-        
-        /* Buttons */
-        button {
-          font-family: inherit;
-          font-size: 14px;
-          border: none;
-          cursor: pointer;
-          transition: all 0.2s;
-          outline: none;
-        }
-        
-        .btn-save {
-          background: #5865F2;
-          color: white;
-          padding: 8px 20px;
-          border-radius: 4px;
-          font-weight: 500;
-        }
-        
-        .btn-save:hover:not(:disabled) {
-          background: #4752c4;
-        }
-        
-        .btn-save:disabled {
-          background: #333;
-          color: #666;
-          cursor: not-allowed;
-          opacity: 0.6;
-        }
-        
-        .btn-logout {
-          background: transparent;
-          color: #888;
-          padding: 8px 16px;
-          border: 1px solid #333;
-          border-radius: 4px;
-        }
-        
-        .btn-logout:hover {
-          background: #222;
-          color: #fff;
-        }
-        
-        .btn-add {
-          background: #333;
-          color: #fff;
-          padding: 10px 20px;
-          border-radius: 4px;
-          font-weight: 500;
-        }
-        
-        .btn-add:hover:not(:disabled) {
-          background: #444;
-        }
-        
-        .btn-add:disabled {
-          background: #222;
-          color: #666;
-          cursor: not-allowed;
-        }
-        
-        .btn-remove {
-          background: transparent;
-          color: #ff6b6b;
-          padding: 6px 12px;
-          border: 1px solid #333;
-          border-radius: 4px;
-          font-size: 13px;
-        }
-        
-        .btn-remove:hover {
-          background: rgba(255, 107, 107, 0.1);
-        }
-        
-        .btn-danger {
-          background: transparent;
-          color: #ff6b6b;
-          padding: 12px 24px;
-          border: 2px solid #ff6b6b;
-          border-radius: 4px;
-          font-weight: 500;
-          font-size: 15px;
-        }
-        
-        .btn-danger:hover:not(:disabled) {
-          background: rgba(255, 107, 107, 0.1);
-        }
-        
-        .btn-danger:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-          border-color: #666;
-          color: #666;
-        }
-        
-        /* Alert */
-        .alert {
-          padding: 12px 16px;
-          margin: 0 24px;
-          border-radius: 4px;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          font-size: 14px;
-          animation: slideDown 0.3s ease;
-        }
-        
-        @keyframes slideDown {
-          from {
-            opacity: 0;
-            transform: translateY(-20px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        
-        .alert.success {
-          background: rgba(46, 204, 113, 0.1);
-          color: #2ecc71;
-          border: 1px solid rgba(46, 204, 113, 0.2);
-        }
-        
-        .alert.error {
-          background: rgba(231, 76, 60, 0.1);
-          color: #e74c3c;
-          border: 1px solid rgba(231, 76, 60, 0.2);
-        }
-        
-        .alert-icon {
-          font-weight: 600;
-          font-size: 16px;
-        }
-        
-        .alert-close {
-          margin-left: auto;
-          background: transparent;
-          color: inherit;
-          font-size: 20px;
-          padding: 0;
-          width: 24px;
-          height: 24px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          opacity: 0.7;
-        }
-        
-        .alert-close:hover {
-          opacity: 1;
-        }
-        
-        /* Container */
-        .container {
-          display: flex;
-          min-height: calc(100vh - 64px);
-        }
-        
-        /* Menu */
-        .menu {
-          width: 240px;
-          background: #111;
-          border-right: 1px solid #222;
-          padding: 24px 0;
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-          flex-shrink: 0;
-        }
-        
-        .menu-section {
-          margin-bottom: 32px;
-        }
-        
-        .menu-title {
-          font-size: 11px;
-          text-transform: uppercase;
-          color: #666;
-          letter-spacing: 1px;
-          margin: 0 24px 12px;
-          font-weight: 500;
-        }
-        
-        .menu-item {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          width: 100%;
-          padding: 12px 24px;
-          background: transparent;
-          color: #888;
-          text-align: left;
-          font-size: 14px;
-          border: none;
-          transition: all 0.2s;
-        }
-        
-        .menu-item:hover {
-          background: #1a1a1a;
-          color: #fff;
-          cursor: pointer;
-        }
-        
-        .menu-item.active {
-          background: #1a1a1a;
-          color: #fff;
-          border-left: 3px solid #5865F2;
-        }
-        
-        .menu-icon {
-          font-size: 16px;
-          width: 24px;
-          text-align: center;
-        }
-        
-        /* User Info Sidebar */
-        .user-info-sidebar {
-          padding: 16px 24px;
-          border-top: 1px solid #222;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-        
-        .user-avatar-sidebar {
-          width: 40px;
-          height: 40px;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border-radius: 50%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-weight: 600;
-          font-size: 16px;
-          color: #fff;
-        }
-        
-        .user-details {
-          flex: 1;
-        }
-        
-        .user-name {
-          font-size: 14px;
-          font-weight: 500;
-          color: #fff;
-          margin-bottom: 2px;
-        }
-        
-        .user-role {
-          font-size: 11px;
-          font-weight: 500;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          padding: 2px 8px;
-          border-radius: 10px;
-          display: inline-block;
-        }
-        
-        .role-admin {
-          background: rgba(231, 76, 60, 0.1);
-          color: #e74c3c;
-          border: 1px solid rgba(231, 76, 60, 0.2);
-        }
-        
-        .role-moderator {
-          background: rgba(52, 152, 219, 0.1);
-          color: #3498db;
-          border: 1px solid rgba(52, 152, 219, 0.2);
-        }
-        
-        .role-viewer {
-          background: rgba(46, 204, 113, 0.1);
-          color: #2ecc71;
-          border: 1px solid rgba(46, 204, 113, 0.2);
-        }
-        
-        /* Content */
-        .content {
-          flex: 1;
-          padding: 32px;
-          overflow-y: auto;
-          min-width: 0; /* Prevent flex overflow */
-        }
-        
-        .section {
-          max-width: 800px;
-          margin: 0 auto;
-        }
-        
-        .section-header {
-          margin-bottom: 32px;
-        }
-        
-        .section-header h2 {
-          font-size: 24px;
-          font-weight: 600;
-          color: #fff;
-          margin-bottom: 8px;
-        }
-        
-        .section-sub {
-          color: #888;
-          font-size: 14px;
-        }
-        
-        .section-description {
-          color: #888;
-          font-size: 14px;
-          margin-bottom: 24px;
-        }
-        
-        /* Card */
-        .card {
-          background: #111;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 24px;
-          margin-bottom: 24px;
-        }
-        
-        .card-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
-        }
-        
-        .card-header h3 {
-          font-size: 16px;
-          font-weight: 500;
-          color: #fff;
-        }
-        
-        .char-count {
-          font-size: 12px;
-          color: #666;
-        }
-        
-        .char-count-warning {
-          color: #ff6b6b;
-        }
-        
-        /* Save Button Container */
-        .save-button-container {
-          margin-top: 24px;
-          padding-top: 20px;
-          border-top: 1px solid #222;
-        }
-        
-        /* Textarea */
-        .textarea {
-          width: 100%;
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 4px;
-          color: #e0e0e0;
-          padding: 16px;
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-          font-size: 14px;
-          line-height: 1.6;
-          resize: vertical;
-          margin-bottom: 24px;
-          transition: border-color 0.2s;
-        }
-        
-        .textarea:focus {
-          outline: none;
-          border-color: #5865F2;
-        }
-        
-        /* Presets */
-        .presets {
-          margin-top: 32px;
-        }
-        
-        .presets h4 {
-          font-size: 14px;
-          font-weight: 500;
-          color: #888;
-          margin-bottom: 16px;
-        }
-        
-        .preset-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-          gap: 16px;
-        }
-        
-        .preset-card {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 4px;
-          padding: 16px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        
-        .preset-card:hover {
-          border-color: #5865F2;
-          background: #141414;
-          transform: translateY(-2px);
-        }
-        
-        .preset-card h5 {
-          font-size: 14px;
-          font-weight: 500;
-          color: #fff;
-          margin-bottom: 4px;
-        }
-        
-        .preset-card p {
-          font-size: 12px;
-          color: #666;
-          line-height: 1.4;
-        }
-        
-        /* Inputs */
-        .form-group {
-          margin-bottom: 20px;
-        }
-        
-        .form-label {
-          display: block;
-          font-size: 14px;
-          font-weight: 500;
-          color: #fff;
-          margin-bottom: 8px;
-        }
-        
-        .input-group {
-          display: flex;
-          gap: 12px;
-          margin-bottom: 8px;
-        }
-        
-        .input {
-          flex: 1;
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 4px;
-          color: #e0e0e0;
-          padding: 10px 12px;
-          font-size: 14px;
-          transition: border-color 0.2s;
-        }
-        
-        .input:focus {
-          outline: none;
-          border-color: #5865F2;
-        }
-        
-        .input-help {
-          font-size: 12px;
-          color: #666;
-          margin-top: 8px;
-          line-height: 1.4;
-        }
-        
-        .input-help a {
-          color: #5865F2;
-          text-decoration: none;
-        }
-        
-        .input-help a:hover {
-          text-decoration: underline;
-        }
-        
-        /* Divider */
-        .divider {
-          height: 1px;
-          background: #222;
-          margin: 24px 0;
-        }
-        
-        /* Empty State */
-        .empty-state {
-          text-align: center;
-          padding: 48px 24px;
-        }
-        
-        .empty-icon {
-          font-size: 48px;
-          opacity: 0.3;
-          margin-bottom: 16px;
-        }
-        
-        .empty-state p {
-          color: #888;
-          margin-bottom: 8px;
-        }
-        
-        .empty-sub {
-          font-size: 13px;
-          color: #666;
-        }
-        
-        /* Channels List */
-        .channels-list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          margin-top: 16px;
-        }
-        
-        .channel-item {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 12px;
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 4px;
-          transition: border-color 0.2s;
-        }
-        
-        .channel-item:hover {
-          border-color: #333;
-        }
-        
-        .channel-info {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-        
-        .channel-id {
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-          font-size: 13px;
-          color: #888;
-          user-select: all;
-        }
-        
-        .channel-status {
-          font-size: 11px;
-          color: #2ecc71;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-        
-        /* Commands List */
-        .commands-list {
-          display: flex;
-          flex-direction: column;
-          gap: 24px;
-          margin-top: 20px;
-        }
-        
-        .command-item {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 20px;
-          transition: all 0.2s;
-        }
-        
-        .command-item:hover {
-          border-color: #333;
-          transform: translateY(-2px);
-        }
-        
-        .command-header {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          margin-bottom: 12px;
-        }
-        
-        .command-header code {
-          background: #222;
-          padding: 8px 16px;
-          border-radius: 4px;
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-          font-size: 15px;
-          color: #e0e0e0;
-          font-weight: 500;
-        }
-        
-        .command-tag {
-          padding: 4px 12px;
-          border-radius: 12px;
-          font-size: 11px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-        
-        .command-tag.user {
-          background: rgba(46, 204, 113, 0.1);
-          color: #2ecc71;
-          border: 1px solid rgba(46, 204, 113, 0.2);
-        }
-        
-        .command-tag.admin {
-          background: rgba(231, 76, 60, 0.1);
-          color: #e74c3c;
-          border: 1px solid rgba(231, 76, 60, 0.2);
-        }
-        
-        .command-description {
-          color: #888;
-          font-size: 14px;
-          line-height: 1.6;
-          margin-bottom: 12px;
-        }
-        
-        .command-examples {
-          margin-top: 16px;
-          padding: 16px;
-          background: rgba(0, 0, 0, 0.2);
-          border-radius: 6px;
-          border: 1px solid #333;
-        }
-        
-        .command-examples strong {
-          display: block;
-          margin-bottom: 8px;
-          color: #e0e0e0;
-          font-size: 13px;
-        }
-        
-        .command-examples ul {
-          list-style: none;
-          padding-left: 0;
-          margin: 0;
-        }
-        
-        .command-examples li {
-          margin-bottom: 6px;
-          color: #888;
-          font-size: 13px;
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
-        }
-        
-        .command-examples li:before {
-          content: "›";
-          color: #5865F2;
-        }
-        
-        .command-examples code {
-          background: #222;
-          padding: 2px 6px;
-          border-radius: 4px;
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-          font-size: 12px;
-          color: #e0e0e0;
-        }
-        
-        /* Image Tips */
-        .image-tips {
-          margin-top: 24px;
-          padding: 20px;
-          background: rgba(88, 101, 242, 0.05);
-          border-radius: 8px;
-          border: 1px solid rgba(88, 101, 242, 0.1);
-        }
-        
-        .image-tips h4 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #5865F2;
-          margin-bottom: 16px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        }
-        
-        .image-tips ul {
-          list-style: none;
-          padding-left: 0;
-        }
-        
-        .image-tips li {
-          margin-bottom: 8px;
-          color: #e0e0e0;
-          font-size: 14px;
-          position: relative;
-          padding-left: 20px;
-        }
-        
-        .image-tips li:before {
-          content: "✓";
-          color: #5865F2;
-          position: absolute;
-          left: 0;
-        }
-        
-        /* Examples Grid */
-        .examples-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-          gap: 20px;
-          margin-top: 20px;
-        }
-        
-        .example-card {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 20px;
-        }
-        
-        .example-card h4 {
-          font-size: 14px;
-          font-weight: 600;
-          color: #fff;
-          margin-bottom: 12px;
-          border-bottom: 1px solid #222;
-          padding-bottom: 8px;
-        }
-        
-        .example-card ul {
-          list-style: none;
-          padding-left: 0;
-        }
-        
-        .example-card li {
-          margin-bottom: 8px;
-          color: #e0e0e0;
-          font-size: 13px;
-          display: flex;
-          align-items: flex-start;
-          gap: 8px;
-        }
-        
-        .example-card li:before {
-          content: "•";
-          color: #5865F2;
-        }
-        
-        .example-card code {
-          background: #222;
-          padding: 2px 6px;
-          border-radius: 4px;
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-          font-size: 12px;
-          color: #e0e0e0;
-          margin-right: 8px;
-        }
-        
-        /* Actions List */
-        .actions-list {
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          margin-top: 20px;
-        }
-        
-        .action-item {
-          display: flex;
-          align-items: flex-start;
-          gap: 16px;
-          padding: 16px;
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          transition: all 0.2s;
-        }
-        
-        .action-item:hover {
-          border-color: #333;
-          transform: translateY(-2px);
-        }
-        
-        .action-icon {
-          font-size: 24px;
-          opacity: 0.7;
-          flex-shrink: 0;
-        }
-        
-        .action-content {
-          flex: 1;
-        }
-        
-        .action-content h4 {
-          font-size: 16px;
-          font-weight: 500;
-          color: #fff;
-          margin-bottom: 8px;
-        }
-        
-        .action-content p {
-          color: #888;
-          font-size: 14px;
-          line-height: 1.6;
-        }
-        
-        /* Memory Section Specific Styles */
-        .btn-refresh {
-          background: #333;
-          color: #fff;
-          padding: 6px 12px;
-          border-radius: 4px;
-          font-size: 13px;
-          font-weight: 500;
-        }
-        
-        .btn-refresh:hover:not(:disabled) {
-          background: #444;
-        }
-        
-        .btn-refresh:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        
-        .loading-skeleton {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-        
-        .skeleton-row {
-          height: 60px;
-          background: linear-gradient(90deg, #1a1a1a 25%, #222 50%, #1a1a1a 75%);
-          background-size: 200% 100%;
-          animation: loading 1.5s infinite;
-          border-radius: 8px;
-        }
-        
-        @keyframes loading {
-          0% { background-position: 200% 0; }
-          100% { background-position: -200% 0; }
-        }
-        
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 16px;
-          margin-top: 16px;
-        }
-        
-        .stat-box {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 20px;
-          display: flex;
-          align-items: center;
-          gap: 16px;
-          transition: all 0.2s;
-        }
-        
-        .stat-box:hover {
-          border-color: #333;
-          transform: translateY(-2px);
-        }
-        
-        .stat-icon {
-          font-size: 24px;
-          opacity: 0.8;
-          width: 50px;
-          height: 50px;
-          background: rgba(88, 101, 242, 0.1);
-          border-radius: 12px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-        
-        .stat-content {
-          flex: 1;
-        }
-        
-        .stat-value-large {
-          font-size: 24px;
-          font-weight: 600;
-          color: #fff;
-          margin-bottom: 4px;
-        }
-        
-        .stat-value-small {
-          font-size: 14px;
-          font-weight: 500;
-          color: #e0e0e0;
-          margin-bottom: 4px;
-        }
-        
-        /* Conversation Preview */
-        .preview-controls {
-          margin-bottom: 20px;
-        }
-        
-        .filter-tabs {
-          display: flex;
-          gap: 8px;
-          margin-bottom: 16px;
-        }
-        
-        .filter-tab {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          color: #888;
-          padding: 8px 16px;
-          border-radius: 4px;
-          font-size: 13px;
-          font-weight: 500;
-        }
-        
-        .filter-tab:hover {
-          background: #141414;
-          color: #fff;
-        }
-        
-        .filter-tab.active {
-          background: #5865F2;
-          color: #fff;
-          border-color: #5865F2;
-        }
-        
-        .filter-input {
-          display: flex;
-          gap: 12px;
-          align-items: center;
-        }
-        
-        .btn-filter {
-          background: #333;
-          color: #fff;
-          padding: 8px 16px;
-          border-radius: 4px;
-          font-size: 13px;
-          font-weight: 500;
-          white-space: nowrap;
-        }
-        
-        .btn-filter:hover:not(:disabled) {
-          background: #444;
-        }
-        
-        .btn-filter:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        
-        .conversations-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          max-height: 400px;
-          overflow-y: auto;
-          padding-right: 8px;
-        }
-        
-        .conversation-item {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 16px;
-          transition: all 0.2s;
-        }
-        
-        .conversation-item:hover {
-          border-color: #333;
-          background: #141414;
-        }
-        
-        .conversation-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 12px;
-          font-size: 12px;
-          color: #666;
-        }
-        
-        .conversation-user,
-        .conversation-channel,
-        .conversation-time {
-          background: #1a1a1a;
-          padding: 4px 8px;
-          border-radius: 4px;
-          font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-        }
-        
-        .conversation-content {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-        
-        .message {
-          display: flex;
-          gap: 8px;
-          align-items: flex-start;
-        }
-        
-        .message-label {
-          font-weight: 600;
-          font-size: 12px;
-          text-transform: uppercase;
-          padding: 2px 6px;
-          border-radius: 4px;
-          white-space: nowrap;
-        }
-        
-        .user-message .message-label {
-          background: rgba(52, 152, 219, 0.1);
-          color: #3498db;
-        }
-        
-        .bot-message .message-label {
-          background: rgba(46, 204, 113, 0.1);
-          color: #2ecc71;
-        }
-        
-        .message p {
-          flex: 1;
-          margin: 0;
-          color: #e0e0e0;
-          font-size: 13px;
-          line-height: 1.4;
-        }
-        
-        /* Memory Controls */
-        .controls-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 20px;
-          margin-top: 20px;
-        }
-        
-        .control-card {
-          background: #0a0a0a;
-          border: 1px solid #222;
-          border-radius: 8px;
-          padding: 20px;
-          transition: all 0.2s;
-        }
-        
-        .control-card:hover {
-          border-color: #333;
-          transform: translateY(-2px);
-        }
-        
-        .control-icon {
-          font-size: 24px;
-          width: 50px;
-          height: 50px;
-          background: rgba(231, 76, 60, 0.1);
-          border-radius: 12px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          margin-bottom: 16px;
-        }
-        
-        .control-card:nth-child(2) .control-icon {
-          background: rgba(52, 152, 219, 0.1);
-        }
-        
-        .control-content h4 {
-          font-size: 16px;
-          font-weight: 500;
-          color: #fff;
-          margin-bottom: 8px;
-        }
-        
-        .control-content p {
-          color: #888;
-          font-size: 13px;
-          margin-bottom: 16px;
-          line-height: 1.4;
-        }
-        
-        .control-input {
-          display: flex;
-          gap: 12px;
-        }
-        
-        .control-input .input {
-          flex: 1;
-        }
-        
-        .btn-control {
-          background: transparent;
-          color: #ff6b6b;
-          padding: 10px 20px;
-          border: 1px solid #ff6b6b;
-          border-radius: 4px;
-          font-weight: 500;
-          white-space: nowrap;
-        }
-        
-        .btn-control:hover:not(:disabled) {
-          background: rgba(255, 107, 107, 0.1);
-        }
-        
-        .btn-control:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-          border-color: #666;
-          color: #666;
-        }
-        
-        .danger-actions {
-          margin-top: 16px;
-        }
-        
-        .danger-zone {
-          margin-top: 0;
-          padding-top: 0;
-          border-top: none;
-        }
-        
-        .danger-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
-        }
-        
-        .danger-header h3 {
-          color: #ff6b6b;
-        }
-        
-        .danger-tag {
-          background: rgba(255, 107, 107, 0.1);
-          color: #ff6b6b;
-          padding: 4px 8px;
-          border-radius: 4px;
-          font-size: 11px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-        
-        .danger-desc {
-          color: #888;
-          margin-bottom: 20px;
-          font-size: 14px;
-        }
-        
-        .danger-note {
-          font-size: 12px;
-          color: #666;
-          margin-top: 16px;
-          line-height: 1.4;
-        }
-        
-        /* Scrollbar Styling */
-        .conversations-list::-webkit-scrollbar {
-          width: 6px;
-        }
-        
-        .conversations-list::-webkit-scrollbar-track {
-          background: #0a0a0a;
-          border-radius: 3px;
-        }
-        
-        .conversations-list::-webkit-scrollbar-thumb {
-          background: #333;
-          border-radius: 3px;
-        }
-        
-        .conversations-list::-webkit-scrollbar-thumb:hover {
-          background: #444;
-        }
-        
-        /* Responsive */
-        @media (max-width: 1024px) {
-          .container {
-            flex-direction: column;
-          }
-          
-          .menu {
-            width: 100%;
-            border-right: none;
-            border-bottom: 1px solid #222;
-            padding: 16px 0;
-          }
-          
-          .menu-section {
-            display: flex;
-            overflow-x: auto;
-            gap: 8px;
-            padding: 0 16px;
-            margin-bottom: 0;
-          }
-          
-          .menu-title {
-            display: none;
-          }
-          
-          .menu-item {
-            white-space: nowrap;
-            padding: 8px 16px;
-            border-radius: 4px;
-            border-left: none !important;
-          }
-          
-          .menu-item.active {
-            background: #1a1a1a;
-          }
-          
-          .user-info-sidebar {
-            display: none;
-          }
-        }
-        
-        @media (max-width: 768px) {
-          .nav {
-            flex-direction: column;
-            height: auto;
-            padding: 16px;
-            gap: 16px;
-          }
-          
-          .nav-stats {
-            order: 3;
-            width: 100%;
-            justify-content: space-around;
-          }
-          
-          .nav-actions {
-            width: 100%;
-            justify-content: flex-end;
-          }
-          
-          .content {
-            padding: 20px;
-          }
-          
-          .preset-grid {
-            grid-template-columns: 1fr;
-          }
-          
-          .examples-grid {
-            grid-template-columns: 1fr;
-          }
-          
-          .command-item {
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 8px;
-          }
-          
-          .input-group {
-            flex-direction: column;
-          }
-          
-          .btn-add, .btn-save {
-            width: 100%;
-          }
-          
-          .stats-grid {
-            grid-template-columns: 1fr;
-          }
-          
-          .controls-grid {
-            grid-template-columns: 1fr;
-          }
-          
-          .conversation-header {
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 8px;
-          }
-          
-          .filter-input {
-            flex-direction: column;
-          }
-          
-          .btn-filter, .btn-control {
-            width: 100%;
-          }
-        }
-      `}</style>
     </div>
   )
 }
